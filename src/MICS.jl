@@ -15,14 +15,11 @@ import Base.show
 
 include("auxiliary.jl")
 
-mutable struct State
+struct State
   sample::DataFrame
   potential::Function
   n::Int                     # number of configurations
   b::Int                     # block size
-  neff::Float64              # effective sample size
-  U::Matrix{Float64}         # reduced energies at all states
-  Um::Matrix{Float64}        # sample means of reduced energies
 
   State(sample,potential,n,b) = new(sample,potential,n,b)
 end
@@ -31,7 +28,13 @@ mutable struct Case
   title::String
   verbose::Bool
   state::Vector{State}
-  m::Int32
+  m::Int
+  U::Vector{Matrix{Float64}}         # reduced energies at all states
+  Um::Vector{Matrix{Float64}}
+  neff::Vector{Float64}              # effective sample sizes
+
+  π::Vector{Float64}
+  f::Vector{Float64}
 
   Case() = new( "Untitled", false, Vector{State}(), 0 )
 
@@ -80,9 +83,9 @@ end
 
 #-------------------------------------------------------------------------------------------
 """
-    covarianceOBM( y; b )
+    covarianceOBM( y, ym, b )
 
-Performs an Overlap Batch Mean analysis with the data stored in matrix `y` and `z`,
+Performs Overlap Batch Mean (OBM) covariance analysis with the data stored in matrix `y`,
 assuming a block size `b`.
 """
 function covarianceOBM( y, ym, b )
@@ -98,14 +101,13 @@ end
 Uses the Overlap Sampling Method of Lee and Scott (1980) to compute free-energies of all
 `states` relative to first one.
 """
-function overlapSampling( states )
-  m = length(states)
-  f = zeros(m)
-  seq = proximitySequence( [states[i].Um[i] for i=1:m] )
+function overlapSampling( case )
+  f = zeros(case.m)
+  seq = proximitySequence( [case.Um[i][i] for i=1:case.m] )
   i = 1
   for j in seq[2:end]
-    f[j] = f[i] + logMeanExp(0.5(states[j].U[:,j] - states[j].U[:,i])) -
-                  logMeanExp(0.5(states[i].U[:,i] - states[i].U[:,j]))
+    f[j] = f[i] + logMeanExp(0.5(case.U[j][:,j] - case.U[j][:,i])) -
+                  logMeanExp(0.5(case.U[i][:,i] - case.U[i][:,j]))
     i = j
   end
   return f
@@ -121,22 +123,54 @@ function compute( case::Case )
   verbose = case.verbose
   m = case.m
 
+  # Allocate matrices:
+  neff = case.neff = Vector{Float64}(m)
+  U = case.U = Vector{Matrix{Float64}}(m)
+  Um = case.Um = Vector{Matrix{Float64}}(m)
+
   # Compute reduced potentials and effective sample sizes:
-  for i in state
-    i.U = Matrix{Float64}(i.n,m)
-    for j = 1:m
-      i.U[:,j] = state[j].potential( i.sample )
+  verbose && println( "Correlation analysis with reduced potentials:" )
+  for (i,iS) in enumerate(state)
+    U[i] = Matrix{Float64}(iS.n,m)
+    for (j,jS) in enumerate(state)
+      U[i][:,j] = jS.potential( iS.sample )
     end
-    i.Um = mean(i.U,1)
-    Σb = covarianceOBM( i.U, i.Um, i.b )
-    Σ1 = covarianceOBM( i.U, i.Um, 1 )
-    i.neff = i.n*eigmax(Σ1)/eigmax(Σb)
+    Um[i] = mean(U[i],1)
+    Σb = covarianceOBM( U[i], Um[i], iS.b )
+    Σ1 = covarianceOBM( U[i], Um[i], 1 )
+    neff[i] = iS.n*eigmax(Σ1)/eigmax(Σb)
   end
+  π = case.π = neff/sum(neff)
+  verbose && println( "Effective sample sizes: ", neff )
+  verbose && println( "Marginal state probabilities: ", π )
 
   # Compute initial guess for free energy differences:
-  verbose && println( "Computing initial guess via Overlap Sampling" )
-  f = overlapSampling( state )
-  verbose && @show f
+  verbose && println( "Overlap Sampling calculations:" )
+  f = case.f = overlapSampling( case )
+  verbose && println( "Free-energy initial guess: ", f )
+
+  # Newton-Raphson iterations:
+  verbose && println("Newton-Raphson iterations:")
+
+
+#  Δf = ones(m-1)
+#  case.M = Matrix{Float64}(m,m)
+#  B = Matrix{Float64}(m,m)
+#  while any(abs.(Δf) .> tol)
+#    for j = 1:m
+#      for k = 1:n[j]
+#        state[j].P[k,:] = posteriors(case.π, state[j].U[k,:], case.f)
+#      end
+#      case.M[:,j] = [mean(state[j].P[:,i]) for i = 1:m]
+#      state[j].Ω = Symmetric(syrk('U', 'T', 1.0, state[j].P)/n[j])
+#    end
+#    Mπ = case.M*case.π
+#    B = Diagonal(Mπ) - sum(case.π[i]*state[i].Ω for i = 1:m)
+#    s = case.π - Mπ
+#    Δf = B[2:m,2:m]\s[2:m]
+#    case.f[2:m] += Δf
+#    case.verbose && println("> f = ", case.f)
+#  end
 
 end
 

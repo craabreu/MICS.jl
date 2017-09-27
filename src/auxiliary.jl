@@ -13,7 +13,7 @@ function proximitySequence( x )
   return seq
 end
 
-function SumOfDeviationsPerBlock( y::Matrix{Float64}, ym::Matrix{Float64}, b::Integer = 1 )
+function SumOfDeviationsPerBlock( y, ym, b )
   (m,n) = size(y)                                  # m = sample size, n = # of properties
   Δy = broadcast(+,y,-ym)                          # Deviations from the sample means
   B = Matrix{Float64}(m-b+1,n)
@@ -22,4 +22,10 @@ function SumOfDeviationsPerBlock( y::Matrix{Float64}, ym::Matrix{Float64}, b::In
     B[j+1,:] = B[j,:] + Δy[j+b,:] - Δy[j,:]        # Sum of deviations of (j+1)-th block
   end
   return B
+end
+
+function posteriors( π, u, f )
+  a = f - u
+  p = π.*exp.(a - maximum(a))
+  return p/sum(p)
 end
