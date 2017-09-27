@@ -16,6 +16,8 @@ import Base.mean
 
 include("auxiliary.jl")
 
+const SymmetricMatrix = Symmetric{Float64,Matrix{Float64}}
+
 struct State
   sample::DataFrame          # properties of sampled configurations
   potential::Function        # reduced potential function
@@ -34,6 +36,8 @@ mutable struct Case
   neff::Vector{Float64}              # effective sample sizes
   π::Vector{Float64}                 # marginal probabilities
   f::Vector{Float64}                 # free energies
+  B0⁺::SymmetricMatrix
+  Θ::SymmetricMatrix
 
   Case() = new( "Untitled", false, Vector{State}(), 0, false )
 
@@ -135,6 +139,14 @@ function posteriors( π, f, u )
 end
 
 #-------------------------------------------------------------------------------------------
+function mics( case::Case, X::Vector{Matrix{Float64}} )
+  Xm = [mean(X[i],1) for i=1:case.m]
+  x0 = vec(sum(case.π.*Xm))
+  Σ0 = sum(case.π[i]^2*covarianceOBM(X[i],Xm[i],case.state[i].b) for i=1:case.m)
+  return vec(x0), Symmetric(Σ0)
+end
+
+#-------------------------------------------------------------------------------------------
 """
     compute!( case )
 """
@@ -167,12 +179,23 @@ function compute( case::Case; tol::Float64 = 1.0e-8 )
     iter += 1
     P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
     p0 = vec(sum(π[i]*mean(P[i],1) for i=1:m))
-    mB0 = sum(Symmetric(syrk('U', 'T', π[i]/n[i], P[i])) for i=1:m) - Symmetric(diagm(p0))
+    mB0 = Symmetric(sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m) - diagm(p0))
     g = p0 - π
     δf = mB0[2:m,2:m]\g[2:m]
     f[2:m] += δf
   end
   verbose && info( prefix="Free energies after $(iter) iterations: ", f )
+
+  # Computation of probability covariance matrix:
+  P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
+  p0, Σ0 = mics( case, P )
+  B0 = Symmetric(diagm(p0) - sum(Symmetric(syrk('U', 'T', π[i]/n[i], P[i])) for i=1:m))
+
+  # Computation of free-energy covariance matrix:
+  D, V = eig(B0)
+  D⁺ = diagm(map(x -> x > tol*maximum(D)? 1.0/x : 0.0, D))
+  B0⁺ = case.B0⁺ = Symmetric(V*D⁺*V')
+  case.Θ = Symmetric(B0⁺*Σ0*B0⁺)
 
   case.upToDate = true
 end
