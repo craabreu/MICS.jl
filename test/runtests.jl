@@ -10,7 +10,7 @@ MICS.add!( case, readtable("log_2.dat",separator=' '), x->β*x[:E2] )
 MICS.add!( case, readtable("log_3.dat",separator=' '), x->β*x[:E3] )
 MICS.add!( case, readtable("log_4.dat",separator=' '), x->β*x[:E4] )
 
-MICS.compute( case )
+@time MICS.compute( case )
 
 println( case )
 #@test 1 == 2

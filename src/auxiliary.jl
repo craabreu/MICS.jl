@@ -24,8 +24,4 @@ function SumOfDeviationsPerBlock( y, ym, b )
   return B
 end
 
-function posteriors( π, u, f )
-  a = f - u
-  p = π.*exp.(a - maximum(a))
-  return p/sum(p)
-end
+

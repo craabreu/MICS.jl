@@ -12,35 +12,34 @@ using DataFrames
 using Base.LinAlg.BLAS
 
 import Base.show
+import Base.mean
 
 include("auxiliary.jl")
 
 struct State
-  sample::DataFrame
-  potential::Function
+  sample::DataFrame          # properties of sampled configurations
+  potential::Function        # reduced potential function
   n::Int                     # number of configurations
   b::Int                     # block size
-
-  State(sample,potential,n,b) = new(sample,potential,n,b)
 end
 
 mutable struct Case
   title::String
   verbose::Bool
   state::Vector{State}
-  m::Int
-  U::Vector{Matrix{Float64}}         # reduced energies at all states
-  Um::Vector{Matrix{Float64}}
+  upToDate::Bool                     # true if energies have been computed
+  m::Int                             # number of states
+  U::Vector{Matrix{Float64}}         # reduced energies
+  Um::Vector{Matrix{Float64}}        # sample means of reduced energies
   neff::Vector{Float64}              # effective sample sizes
+  π::Vector{Float64}                 # marginal probabilities
+  f::Vector{Float64}                 # free energies
 
-  π::Vector{Float64}
-  f::Vector{Float64}
-
-  Case() = new( "Untitled", false, Vector{State}(), 0 )
+  Case() = new( "Untitled", false, Vector{State}(), 0, false )
 
   function Case(title::String; verbose::Bool = false)
-    verbose && println("Creating empty MICS case \"$title\"")
-    new( title, verbose, Vector{State}(), 0 )
+    verbose && info( prefix="Creating empty MICS case: ", title )
+    new( title, verbose, Vector{State}(), 0, false )
   end
 end
 
@@ -71,14 +70,15 @@ the specified MICS `case`.
 * `potential::Function`: 
 """
 function add!( case::Case, sample::DataFrame, potential::Function )
-  case.verbose && println("Adding new state to case \"$(case.title)\"")
-  case.m == 0 || names(sample) == names(case.state[1].sample) ||
-    error("trying to add inconsistent data")
   n = size(sample,1)
+  case.verbose &&
+    info( prefix="Adding new state to MICS case $(case.title ): ", n, " configurations" )
+  case.m == 0 || names(sample) == names(case.state[1].sample) ||
+    error( "trying to add inconsistent data" )
   b = round(Int32,sqrt(n))
   push!( case.state, State(sample,potential,n,b) )
   case.m += 1
-  case.verbose && println("  Number of configurations: ", n )
+  case.upToDate = false
 end
 
 #-------------------------------------------------------------------------------------------
@@ -114,64 +114,67 @@ function overlapSampling( case )
 end
 
 #-------------------------------------------------------------------------------------------
+function evaluate( case::Case, func::Vector{Function} )
+  m = case.m
+  n = length(func)
+  f = Vector{Matrix{Float64}}(m)
+  for (i,S) in enumerate(case.state)
+    f[i] = Matrix{Float64}(S.n,n)
+    for j = 1:n
+      f[i][:,j] = func[j]( S.sample )
+    end
+  end
+  return f
+end
+
+#-------------------------------------------------------------------------------------------
+function posteriors( π, f, u )
+  a = f - u
+  p = π.*exp.(a - maximum(a))
+  return p/sum(p)
+end
+
+#-------------------------------------------------------------------------------------------
 """
     compute!( case )
 """
-function compute( case::Case )
+function compute( case::Case; tol::Float64 = 1.0e-8 )
 
   state = case.state
   verbose = case.verbose
   m = case.m
+  n = [state[i].n for i=1:m]
 
-  # Allocate matrices:
-  neff = case.neff = Vector{Float64}(m)
-  U = case.U = Vector{Matrix{Float64}}(m)
-  Um = case.Um = Vector{Matrix{Float64}}(m)
+  # Evaluate reduced potentials at all states and their sample means:
+  U = case.U = evaluate( case, [state[i].potential for i=1:m] )
+  Um = case.Um = [mean(U[i],1) for i=1:m]
 
-  # Compute reduced potentials and effective sample sizes:
-  verbose && println( "Correlation analysis with reduced potentials:" )
-  for (i,iS) in enumerate(state)
-    U[i] = Matrix{Float64}(iS.n,m)
-    for (j,jS) in enumerate(state)
-      U[i][:,j] = jS.potential( iS.sample )
-    end
-    Um[i] = mean(U[i],1)
-    Σb = covarianceOBM( U[i], Um[i], iS.b )
-    Σ1 = covarianceOBM( U[i], Um[i], 1 )
-    neff[i] = iS.n*eigmax(Σ1)/eigmax(Σb)
-  end
+  # Compute effective sample sizes and marginal state probabilities:
+  Σb = [covarianceOBM(U[i],Um[i],state[i].b) for i=1:m]
+  Σ1 = [covarianceOBM(U[i],Um[i],1) for i=1:m]
+  neff = case.neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
   π = case.π = neff/sum(neff)
-  verbose && println( "Effective sample sizes: ", neff )
-  verbose && println( "Marginal state probabilities: ", π )
 
-  # Compute initial guess for free energy differences:
-  verbose && println( "Overlap Sampling calculations:" )
-  f = case.f = overlapSampling( case )
-  verbose && println( "Free-energy initial guess: ", f )
+  verbose && (info( prefix="Effective sample sizes: ", neff );
+              info( prefix="Marginal state probabilities: ", π ))
 
   # Newton-Raphson iterations:
-  verbose && println("Newton-Raphson iterations:")
+  δf = ones(m-1)
+  iter = 0
+  f = case.f = overlapSampling( case )
+  verbose && info( prefix="Initial free-energy guess: ", f )
+  while any(abs.(δf) .> tol)
+    iter += 1
+    P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
+    p0 = vec(sum(π[i]*mean(P[i],1) for i=1:m))
+    mB0 = sum(Symmetric(syrk('U', 'T', π[i]/n[i], P[i])) for i=1:m) - Symmetric(diagm(p0))
+    g = p0 - π
+    δf = mB0[2:m,2:m]\g[2:m]
+    f[2:m] += δf
+  end
+  verbose && info( prefix="Free energies after $(iter) iterations: ", f )
 
-
-#  Δf = ones(m-1)
-#  case.M = Matrix{Float64}(m,m)
-#  B = Matrix{Float64}(m,m)
-#  while any(abs.(Δf) .> tol)
-#    for j = 1:m
-#      for k = 1:n[j]
-#        state[j].P[k,:] = posteriors(case.π, state[j].U[k,:], case.f)
-#      end
-#      case.M[:,j] = [mean(state[j].P[:,i]) for i = 1:m]
-#      state[j].Ω = Symmetric(syrk('U', 'T', 1.0, state[j].P)/n[j])
-#    end
-#    Mπ = case.M*case.π
-#    B = Diagonal(Mπ) - sum(case.π[i]*state[i].Ω for i = 1:m)
-#    s = case.π - Mπ
-#    Δf = B[2:m,2:m]\s[2:m]
-#    case.f[2:m] += Δf
-#    case.verbose && println("> f = ", case.f)
-#  end
-
+  case.upToDate = true
 end
 
 #-------------------------------------------------------------------------------------------
