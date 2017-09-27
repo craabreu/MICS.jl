@@ -13,11 +13,13 @@ using Base.LinAlg.BLAS
 
 import Base.show
 
+include("auxiliary.jl")
+
 mutable struct State
   sample::DataFrame
   potential::Function
-  n::Int32                   # number of configurations
-  b::Int32                   # block size
+  n::Int                     # number of configurations
+  b::Int                     # block size
   neff::Float64              # effective sample size
   U::Matrix{Float64}         # reduced energies at all states
   Um::Matrix{Float64}        # sample means of reduced energies
@@ -25,27 +27,27 @@ mutable struct State
   State(sample,potential,n,b) = new(sample,potential,n,b)
 end
 
-struct Case
+mutable struct Case
   title::String
   verbose::Bool
   state::Vector{State}
+  m::Int32
 
-  Case() = new( "Untitled", false, Vector{State}() )
+  Case() = new( "Untitled", false, Vector{State}(), 0 )
 
   function Case(title::String; verbose::Bool = false)
     verbose && println("Creating empty MICS case \"$title\"")
-    new( title, verbose, Vector{State}() )
+    new( title, verbose, Vector{State}(), 0 )
   end
 end
 
 #-------------------------------------------------------------------------------------------
 function show( io::IO, case::Case )
   state = case.state
-  n = length(state)
-  if n > 0
-    s = n > 1 ? "s" : ""
-    println(io, "MICS case \"$(case.title)\" contains $n state$(s):")
-    println(io, "  - Sample size$(s): ",[size(state[i].sample,1) for i=1:n])
+  if case.m > 0
+    s = case.m > 1 ? "s" : ""
+    println(io, "MICS case \"$(case.title)\" contains $(case.m) state$(s):")
+    println(io, "  - Sample size$(s): ",[size(state[i].sample,1) for i=1:case.m])
     s = size(state[1].sample,2) > 1 ? "ies" : "y"
     println(io, "  - Propert$(s): ", join(map(string,names(state[1].sample)),", "))
   else
@@ -67,27 +69,13 @@ the specified MICS `case`.
 """
 function add!( case::Case, sample::DataFrame, potential::Function )
   case.verbose && println("Adding new state to case \"$(case.title)\"")
-  length(case.state) == 0 || names(sample) == names(case.state[1].sample) ||
+  case.m == 0 || names(sample) == names(case.state[1].sample) ||
     error("trying to add inconsistent data")
   n = size(sample,1)
   b = round(Int32,sqrt(n))
   push!( case.state, State(sample,potential,n,b) )
+  case.m += 1
   case.verbose && println("  Number of configurations: ", n )
-end # function add!
-
-#-------------------------------------------------------------------------------------------
-"""
-    SumOfDeviationsPerBlock( y, ym, b )
-"""
-function SumOfDeviationsPerBlock( y, ym, b )
-  (m,n) = size(y)                                  # m = sample size, n = # of properties
-  Δy = broadcast(+,y,-ym)                          # Deviations from the sample means
-  B = Matrix{Float64}(m-b+1,n)
-  B[1,:] = sum(Δy[1:b,:],1)                        # Sum of deviations of first block
-  for j = 1:m-b
-    B[j+1,:] = B[j,:] + Δy[j+b,:] - Δy[j,:]        # Sum of deviations of (j+1)-th block
-  end
-  return B
 end
 
 #-------------------------------------------------------------------------------------------
@@ -105,12 +93,33 @@ end
 
 #-------------------------------------------------------------------------------------------
 """
+    overlapSampling( states )
+
+Uses the Overlap Sampling Method of Lee and Scott (1980) to compute free-energies of all
+`states` relative to first one.
+"""
+function overlapSampling( states )
+  m = length(states)
+  f = zeros(m)
+  seq = proximitySequence( [states[i].Um[i] for i=1:m] )
+  i = 1
+  for j in seq[2:end]
+    f[j] = f[i] + logMeanExp(0.5(states[j].U[:,j] - states[j].U[:,i])) -
+                  logMeanExp(0.5(states[i].U[:,i] - states[i].U[:,j]))
+    i = j
+  end
+  return f
+end
+
+#-------------------------------------------------------------------------------------------
+"""
     compute!( case )
 """
 function compute( case::Case )
 
   state = case.state
-  m = length(state)
+  verbose = case.verbose
+  m = case.m
 
   # Compute reduced potentials and effective sample sizes:
   for i in state
@@ -123,7 +132,13 @@ function compute( case::Case )
     Σ1 = covarianceOBM( i.U, i.Um, 1 )
     i.neff = i.n*eigmax(Σ1)/eigmax(Σb)
   end
-end # compute
+
+  # Compute initial guess for free energy differences:
+  verbose && println( "Computing initial guess via Overlap Sampling" )
+  f = overlapSampling( state )
+  verbose && @show f
+
+end
 
 #-------------------------------------------------------------------------------------------
-end # module
+end
