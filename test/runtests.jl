@@ -12,5 +12,4 @@ MICS.add!( case, readtable("log_4.dat",separator=' '), x->β*x[:E4] )
 
 @time MICS.compute( case )
 
-println( case )
 #@test 1 == 2

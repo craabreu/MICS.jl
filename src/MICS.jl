@@ -36,6 +36,8 @@ mutable struct Case
   neff::Vector{Float64}              # effective sample sizes
   π::Vector{Float64}                 # marginal probabilities
   f::Vector{Float64}                 # free energies
+  δ²f::Vector{Float64}               # free-energy square errors
+  O::Matrix{Float64}                 # overlap matrix
   B0⁺::SymmetricMatrix
   Θ::SymmetricMatrix
 
@@ -48,17 +50,11 @@ mutable struct Case
 end
 
 #-------------------------------------------------------------------------------------------
-function show( io::IO, case::Case )
-  state = case.state
-  if case.m > 0
-    s = case.m > 1 ? "s" : ""
-    println(io, "MICS case \"$(case.title)\" contains $(case.m) state$(s):")
-    println(io, "  - Sample size$(s): ",[size(state[i].sample,1) for i=1:case.m])
-    s = size(state[1].sample,2) > 1 ? "ies" : "y"
-    println(io, "  - Propert$(s): ", join(map(string,names(state[1].sample)),", "))
-  else
-    println(io, "MICS case \"$(case.title)\" contains no states.")
-  end
+function infoarray( msg::String, x::Array )
+  print_with_color( :cyan, msg, bold=true )
+  println()
+  Base.showarray( STDOUT, x, false; header=false )
+  println()
 end
 
 #-------------------------------------------------------------------------------------------
@@ -143,8 +139,9 @@ function mics( case::Case, X::Vector{Matrix{Float64}} )
   Xm = [mean(X[i],1) for i=1:case.m]
   x0 = vec(sum(case.π.*Xm))
   Σ0 = sum(case.π[i]^2*covarianceOBM(X[i],Xm[i],case.state[i].b) for i=1:case.m)
-  return vec(x0), Symmetric(Σ0)
+  return vec(x0), Symmetric(Σ0), Xm
 end
+
 
 #-------------------------------------------------------------------------------------------
 """
@@ -167,35 +164,41 @@ function compute( case::Case; tol::Float64 = 1.0e-8 )
   neff = case.neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
   π = case.π = neff/sum(neff)
 
-  verbose && (info( prefix="Effective sample sizes: ", neff );
-              info( prefix="Marginal state probabilities: ", π ))
+  verbose && (infoarray( "Effective sample sizes: ", neff );
+              infoarray( "Marginal state probabilities: ", π ))
 
   # Newton-Raphson iterations:
-  δf = ones(m-1)
+  Δf = ones(m-1)
   iter = 0
   f = case.f = overlapSampling( case )
-  verbose && info( prefix="Initial free-energy guess: ", f )
-  while any(abs.(δf) .> tol)
+  verbose && infoarray( "Initial free-energy guess:", f )
+  while any(abs.(Δf) .> tol)
     iter += 1
     P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
     p0 = vec(sum(π[i]*mean(P[i],1) for i=1:m))
     mB0 = Symmetric(sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m) - diagm(p0))
     g = p0 - π
-    δf = mB0[2:m,2:m]\g[2:m]
-    f[2:m] += δf
+    Δf = mB0[2:m,2:m]\g[2:m]
+    f[2:m] += Δf
   end
-  verbose && info( prefix="Free energies after $(iter) iterations: ", f )
+  verbose && infoarray( "Free energies after $(iter) iterations:", f )
 
   # Computation of probability covariance matrix:
   P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
-  p0, Σ0 = mics( case, P )
+  p0, Σ0, Pm = mics( case, P )
   B0 = Symmetric(diagm(p0) - sum(Symmetric(syrk('U', 'T', π[i]/n[i], P[i])) for i=1:m))
+
+  # Compute overlap matrix:
+  case.O = [Pm[j][i] for i=1:m, j=1:m]
+  verbose && infoarray( "Overlap matrix:", case.O )
 
   # Computation of free-energy covariance matrix:
   D, V = eig(B0)
   D⁺ = diagm(map(x -> x > tol*maximum(D)? 1.0/x : 0.0, D))
   B0⁺ = case.B0⁺ = Symmetric(V*D⁺*V')
   case.Θ = Symmetric(B0⁺*Σ0*B0⁺)
+  δ²f = case.δ²f = [case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:m]
+  verbose && infoarray( "Free energies and uncertainties:", [f fill('±',m) sqrt.(δ²f)] )
 
   case.upToDate = true
 end
