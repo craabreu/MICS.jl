@@ -44,17 +44,20 @@ mutable struct Case
   Case() = new( "Untitled", false, Vector{State}(), 0, false )
 
   function Case(title::String; verbose::Bool = false)
-    verbose && info( prefix="Creating empty MICS case: ", title )
+    verbose && info( "Creating empty MICS case: ", title )
     new( title, verbose, Vector{State}(), 0, false )
   end
 end
 
 #-------------------------------------------------------------------------------------------
-function infoarray( msg::String, x::Array )
-  print_with_color( :cyan, msg, bold=true )
-  println()
-  Base.showarray( STDOUT, x, false; header=false )
-  println()
+function info( msg::String, x )
+  println( "\033[1;36m", msg, "\033[0;36m")
+  if (isa(x,AbstractArray))
+    Base.showarray( STDOUT, x, false; header=false )
+  else
+    print( STDOUT, " ", x )
+  end
+  println("\033[0m")
 end
 
 #-------------------------------------------------------------------------------------------
@@ -72,7 +75,7 @@ the specified MICS `case`.
 function add!( case::Case, sample::DataFrame, potential::Function )
   n = size(sample,1)
   case.verbose &&
-    info( prefix="Adding new state to MICS case $(case.title ): ", n, " configurations" )
+    info( "Adding new state to MICS case $(case.title ): ", "$(n) configurations" )
   case.m == 0 || names(sample) == names(case.state[1].sample) ||
     error( "trying to add inconsistent data" )
   b = round(Int32,sqrt(n))
@@ -158,20 +161,21 @@ function compute( case::Case; tol::Float64 = 1.0e-8 )
   U = case.U = evaluate( case, [state[i].potential for i=1:m] )
   Um = case.Um = [mean(U[i],1) for i=1:m]
 
-  # Compute effective sample sizes and marginal state probabilities:
+  # Compute effective sample sizes:
   Σb = [covarianceOBM(U[i],Um[i],state[i].b) for i=1:m]
   Σ1 = [covarianceOBM(U[i],Um[i],1) for i=1:m]
   neff = case.neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
-  π = case.π = neff/sum(neff)
+  verbose && info( "Effective sample sizes: ", neff )
 
-  verbose && (infoarray( "Effective sample sizes: ", neff );
-              infoarray( "Marginal state probabilities: ", π ))
+  # Compute marginal state probabilities:
+  π = case.π = neff/sum(neff)
+  verbose && info( "Marginal state probabilities: ", π )
 
   # Newton-Raphson iterations:
   Δf = ones(m-1)
   iter = 0
   f = case.f = overlapSampling( case )
-  verbose && infoarray( "Initial free-energy guess:", f )
+  verbose && info( "Initial free-energy guess:", f )
   while any(abs.(Δf) .> tol)
     iter += 1
     P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
@@ -181,7 +185,7 @@ function compute( case::Case; tol::Float64 = 1.0e-8 )
     Δf = mB0[2:m,2:m]\g[2:m]
     f[2:m] += Δf
   end
-  verbose && infoarray( "Free energies after $(iter) iterations:", f )
+  verbose && info( "Free energies after $(iter) iterations:", f )
 
   # Computation of probability covariance matrix:
   P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
@@ -190,15 +194,18 @@ function compute( case::Case; tol::Float64 = 1.0e-8 )
 
   # Compute overlap matrix:
   case.O = [Pm[j][i] for i=1:m, j=1:m]
-  verbose && infoarray( "Overlap matrix:", case.O )
+  verbose && info( "Overlap matrix:", case.O )
 
   # Computation of free-energy covariance matrix:
   D, V = eig(B0)
   D⁺ = diagm(map(x -> x > tol*maximum(D)? 1.0/x : 0.0, D))
   B0⁺ = case.B0⁺ = Symmetric(V*D⁺*V')
   case.Θ = Symmetric(B0⁺*Σ0*B0⁺)
-  δ²f = case.δ²f = [case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:m]
-  verbose && infoarray( "Free energies and uncertainties:", [f fill('±',m) sqrt.(δ²f)] )
+  verbose && info( "Free-energy covariance matrix:", full(case.Θ) )
+
+  # Computation of free-energy uncertainties:
+  case.δ²f = [case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:m]
+  verbose && info( "Free-energy uncertainties:", sqrt.(case.δ²f) )
 
   case.upToDate = true
 end
