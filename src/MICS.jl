@@ -18,11 +18,12 @@ include("auxiliary.jl")
 
 const SymmetricMatrix = Symmetric{Float64,Matrix{Float64}}
 
-struct State
+mutable struct State
   sample::DataFrame          # properties of sampled configurations
   potential::Function        # reduced potential function
   n::Int                     # number of configurations
   b::Int                     # block size
+  State(sample,potential,n) = new(sample,potential,n,round(Int,sqrt(n)))
 end
 
 mutable struct Case
@@ -31,9 +32,7 @@ mutable struct Case
   state::Vector{State}
   upToDate::Bool                     # true if energies have been computed
   m::Int                             # number of states
-  U::Vector{Matrix{Float64}}         # reduced energies
-  Um::Vector{Matrix{Float64}}        # sample means of reduced energies
-  neff::Vector{Float64}              # effective sample sizes
+  u::Vector{Matrix{Float64}}
   π::Vector{Float64}                 # marginal probabilities
   f::Vector{Float64}                 # free energies
   δ²f::Vector{Float64}               # free-energy square errors
@@ -78,8 +77,8 @@ function add!( case::Case, sample::DataFrame, potential::Function )
     info( "Adding new state to MICS case $(case.title ): ", "$(n) configurations" )
   case.m == 0 || names(sample) == names(case.state[1].sample) ||
     error( "trying to add inconsistent data" )
-  b = round(Int32,sqrt(n))
-  push!( case.state, State(sample,potential,n,b) )
+#  b = round(Int32,sqrt(n))
+  push!( case.state, State(sample,potential,n) )
   case.m += 1
   case.upToDate = false
 end
@@ -94,7 +93,15 @@ assuming a block size `b`.
 function covarianceOBM( y, ym, b )
   S = SumOfDeviationsPerBlock( y, ym, b )          # Blockwise sum of deviations
   n = size(y,1) - b                                # Number of blocks minus 1
-  Symmetric(syrk('U', 'T', 1.0/(b*n*(n+1)), S))    # Covariance matrix
+  return Symmetric(syrk('U', 'T', 1.0/(b*n*(n+1)), S))    # Covariance matrix
+end
+
+function OBM( y, b )
+  ym = mean(ym,2)
+  S = SumOfDeviationsPerBlock( y, ym, b )
+  n = size(y,1)
+  Σ = syrk('U', 'T', 1.0/(b*(n-b)*(n-b+1)), S)
+  return vec(ym), Symmetric(Σ)
 end
 
 #-------------------------------------------------------------------------------------------
@@ -106,11 +113,12 @@ Uses the Overlap Sampling Method of Lee and Scott (1980) to compute free-energie
 """
 function overlapSampling( case )
   f = zeros(case.m)
-  seq = proximitySequence( [case.Um[i][i] for i=1:case.m] )
+  u = case.u
+  seq = proximitySequence( [mean(u[i][:,i]) for i=1:case.m] )
   i = 1
   for j in seq[2:end]
-    f[j] = f[i] + logMeanExp(0.5(case.U[j][:,j] - case.U[j][:,i])) -
-                  logMeanExp(0.5(case.U[i][:,i] - case.U[i][:,j]))
+    f[j] = f[i] + logMeanExp(0.5(u[j][:,j] - u[j][:,i])) - 
+                  logMeanExp(0.5(u[i][:,i] - u[i][:,j]))
     i = j
   end
   return f
@@ -131,76 +139,94 @@ function evaluate( case::Case, func::Vector{Function} )
 end
 
 #-------------------------------------------------------------------------------------------
-function posteriors( π, f, u )
-  a = f - u
-  p = π.*exp.(a - maximum(a))
-  return p/sum(p)
-end
-
-#-------------------------------------------------------------------------------------------
 function mics( case::Case, X::Vector{Matrix{Float64}} )
   Xm = [mean(X[i],1) for i=1:case.m]
-  x0 = vec(sum(case.π.*Xm))
-  Σ0 = sum(case.π[i]^2*covarianceOBM(X[i],Xm[i],case.state[i].b) for i=1:case.m)
+  x0 = sum(case.π .* Xm)
+  Σ0 = sum(case.π[i]^2 * covarianceOBM(X[i],Xm[i],case.state[i].b) for i=1:case.m)
   return vec(x0), Symmetric(Σ0), Xm
 end
 
+#-------------------------------------------------------------------------------------------
+function compute_probabilities!( P, π, f, u )
+  g = (f + log.(π))'
+  for i = 1:length(P)
+    a = g .- u[i]
+    b = exp.(a .- maximum(a,2))
+    P[i] = b ./ sum(b,2)
+  end
+end
 
 #-------------------------------------------------------------------------------------------
 """
     compute!( case )
 """
-function compute( case::Case; tol::Float64 = 1.0e-8 )
+function compute( case::Case; tol::Float64 = 1.0e-8, priors::Vector{Float64} = [] )
 
   state = case.state
   verbose = case.verbose
   m = case.m
   n = [state[i].n for i=1:m]
 
-  # Evaluate reduced potentials at all states and their sample means:
-  U = case.U = evaluate( case, [state[i].potential for i=1:m] )
-  Um = case.Um = [mean(U[i],1) for i=1:m]
+  # Allocate matrices and compute the reduced potentials:
+  u = case.u = Vector{Matrix{Float64}}(m)
+  P = Vector{Matrix{Float64}}(m)
+  for i = 1:m
+    u[i] = Matrix{Float64}(n[i],m)
+    P[i] = Matrix{Float64}(n[i],m)
+    for j = 1:m
+      u[i][:,j] = state[j].potential( state[i].sample )
+    end
+  end
 
-  # Compute effective sample sizes:
-  Σb = [covarianceOBM(U[i],Um[i],state[i].b) for i=1:m]
-  Σ1 = [covarianceOBM(U[i],Um[i],1) for i=1:m]
-  neff = case.neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
-  verbose && info( "Effective sample sizes: ", neff )
+  if isempty(priors)
 
-  # Compute marginal state probabilities:
-  π = case.π = neff/sum(neff)
+    # Compute effective sample sizes:
+    Σb = [covarianceOBM(u[i],Um[i],state[i].b) for i=1:m]
+    Σ1 = [covarianceOBM(u[i],Um[i],1) for i=1:m]
+    neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
+    verbose && info( "Effective sample sizes: ", neff )
+
+    # Compute marginal state probabilities:
+    π = case.π = neff/sum(neff)
+
+  else
+
+    length(priors) == m || error( "wrong number of specified priors" )
+    π = case.π = priors/sum(priors)
+
+  end
   verbose && info( "Marginal state probabilities: ", π )
 
   # Newton-Raphson iterations:
-  Δf = ones(m-1)
-  iter = 0
   f = case.f = overlapSampling( case )
   verbose && info( "Initial free-energy guess:", f )
+
+  Δf = ones(m-1)
+  iter = 0
   while any(abs.(Δf) .> tol)
     iter += 1
-    P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
-    p0 = vec(sum(π[i]*mean(P[i],1) for i=1:m))
-    mB0 = Symmetric(sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m) - diagm(p0))
-    g = p0 - π
-    Δf = mB0[2:m,2:m]\g[2:m]
+    compute_probabilities!( P, case.π, case.f, u )
+    p0 = [mean(P[j][:,i]) for i=1:m, j=1:m]*π
+    B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
+    Δf = B0[2:m,2:m]\(π - p0)[2:m]
     f[2:m] += Δf
   end
   verbose && info( "Free energies after $(iter) iterations:", f )
 
   # Computation of probability covariance matrix:
-  P = [mapslices(u->posteriors(π,f,u),U[i],2) for i=1:m]
-  p0, Σ0, Pm = mics( case, P )
-  B0 = Symmetric(diagm(p0) - sum(Symmetric(syrk('U', 'T', π[i]/n[i], P[i])) for i=1:m))
+  compute_probabilities!( P, case.π, case.f, u )
+  p0, Σ0, pm = mics( case, P )
+  B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
 
   # Compute overlap matrix:
-  case.O = [Pm[j][i] for i=1:m, j=1:m]
+  case.O = [pm[j][i] for i=1:m, j=1:m]
   verbose && info( "Overlap matrix:", case.O )
 
   # Computation of free-energy covariance matrix:
-  D, V = eig(B0)
-  D⁺ = diagm(map(x -> x > tol*maximum(D)? 1.0/x : 0.0, D))
-  B0⁺ = case.B0⁺ = Symmetric(V*D⁺*V')
-  case.Θ = Symmetric(B0⁺*Σ0*B0⁺)
+  (D, V) = eig(B0)
+  D⁺ = diagm(map(x-> abs(x) < tol ? 0.0 : 1.0/x, D))
+  case.B0⁺ = Symmetric(V*D⁺*V')
+  case.Θ = Symmetric(case.B0⁺*Σ0*case.B0⁺)
   verbose && info( "Free-energy covariance matrix:", full(case.Θ) )
 
   # Computation of free-energy uncertainties:
