@@ -3,6 +3,11 @@ function logMeanExp( x )
   return xmax + log.(mean(exp.(x - xmax)))
 end
 
+function logSumExp( x )
+  xmax = maximum(x)
+  return xmax + log.(sum(exp.(x - xmax)))
+end
+
 function proximitySequence( x )
   m = length(x)
   seq = collect(1:m)

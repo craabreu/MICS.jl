@@ -42,8 +42,9 @@ mutable struct Case
   m::Int                     # number of states
   u::MatrixVector            # reduced energies of each configuration at all states
   P::MatrixVector            # probabilities of each configuration at all states
-  π::Vector{Float64}         # marginal probabilities
-  f::Vector{Float64}         # free energies
+  π::Vector{Float64}         # mixture composition
+  f::Vector{Float64}         # free energy of each state
+  u0::MatrixVector           # reduced energy of each configuration at the mixture state
   O::Matrix{Float64}         # overlap matrix
   B0⁺::SymmetricMatrix
   Θ::SymmetricMatrix
@@ -138,14 +139,30 @@ end
 
 
 """
-    compute_probabilities!( P, π, f, u )
+    computeProbabilities!( P, π, f, u )
 """
-function compute_probabilities!( P, π, f, u )
+function computeProbabilities!( P, π, f, u )
   g = (f + log.(π))'
   for i = 1:length(P)
     a = g .- u[i]
     b = exp.(a .- maximum(a,2))
     P[i] = b ./ sum(b,2)
+  end
+end
+
+
+"""
+    computeEnergiesAndProbabilities!( u0, P, π, f, u )
+"""
+function computeEnergiesAndProbabilities!( u0, P, π, f, u )
+  g = (f + log.(π))'
+  for i = 1:length(P)
+    a = g .- u[i]
+    max = maximum(a,2)
+    numer = exp.(a .- max)
+    denom = sum(numer,2)
+    P[i] = numer ./ denom
+    u0[i] = max + log.(denom)
   end
 end
 
@@ -160,16 +177,18 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   m = case.m
   n = [state[i].n for i=1:m]
 
-  # Compute marginal state probabilities:
+  # Compute mixture composition:
   π = case.π = [state[i].neff for i=1:m]/sum(state[i].neff for i=1:m)
-  verbose && info( "Marginal state probabilities: ", π )
+  verbose && info( "Mixture composition: ", π )
 
   # Allocate matrices and compute the reduced potentials:
   u = case.u = MatrixVector(m)
   P = case.P = MatrixVector(m)
+  u0 = case.u0 = MatrixVector(m)
   for i = 1:m
     u[i] = Matrix{Float64}(n[i],m)
     P[i] = Matrix{Float64}(n[i],m)
+    u0[i] = Matrix{Float64}(n[i],1)
     for j = 1:m
       u[i][:,j] = state[j].potential( state[i].sample )
     end
@@ -183,7 +202,7 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   iter = 0
   while any(abs.(Δf) .> tol)
     iter += 1
-    compute_probabilities!( P, case.π, case.f, u )
+    computeProbabilities!( P, case.π, case.f, u )
     p0 = [mean(P[j][:,i]) for i=1:m, j=1:m]*π
     B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
     Δf = B0[2:m,2:m]\(π - p0)[2:m]
@@ -192,7 +211,7 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   verbose && info( "Free energies after $(iter) iterations:", case.f )
 
   # Computation of probability covariance matrix:
-  compute_probabilities!( P, case.π, case.f, u )
+  computeEnergiesAndProbabilities!( u0, P, case.π, case.f, u )
   p0, Σ0, pm = mics( case, P )
   B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
 
