@@ -10,7 +10,7 @@ function proximitySequence( x )
     j = i + indmin(abs.(x[seq[i+1:m]] - x[seq[i]]))
     seq[[i+1,j]] = seq[[j,i+1]]
   end
-  return seq
+  return seq[2:end]
 end
 
 function SumOfDeviationsPerBlock( y, ym, b )
@@ -24,16 +24,19 @@ function SumOfDeviationsPerBlock( y, ym, b )
   return B
 end
 
-function info( msg::String, val = nothing )
-  msg_color = "\033[1;36m"
-  val_color = "\033[0;36m"
-  no_color  = "\033[0m"
+function info( io::IO, msg::String, val )
+  const msg_color = "\033[1;36m"
+  const val_color = "\033[0;36m"
+  const no_color  = "\033[0m"
   print( msg_color, msg )
   if (isa(val,AbstractArray))
     println( val_color )
-    Base.showarray( STDOUT, val, false; header=false )
+    Base.showarray( io, val, false; header=false )
   elseif (val != nothing)
-    print( STDOUT, val_color, val )
+    print( io, val_color, val )
   end
   println( no_color )
 end
+
+info(msg::String,val) = info(STDOUT,msg,val)
+info(msg::String) = info(msg,nothing)

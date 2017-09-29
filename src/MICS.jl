@@ -11,17 +11,15 @@ module MICS
 using DataFrames
 using Base.LinAlg.BLAS
 
-import Base: show
-
 include("auxiliary.jl")
 
 struct State
-  sample::DataFrame                  # properties of sampled configurations
-  potential::Function                # reduced potential function
-  autocorr::Function                 # autocorrelated function
-  n::Int                             # number of configurations
-  b::Int                             # block size
-  neff::Float64                      # effective sample size
+  sample::DataFrame          # properties of sampled configurations
+  potential::Function        # reduced potential function
+  autocorr::Function         # autocorrelated function
+  n::Int                     # number of configurations
+  b::Int                     # block size
+  neff::Float64              # effective sample size
 
   function State( sample, potential, autocorr )
     n = nrow(sample)
@@ -41,18 +39,18 @@ mutable struct Case
   title::String
   verbose::Bool
   state::Vector{State}
-  upToDate::Bool                     # true if energies have been computed
-  m::Int                             # number of states
-  u::MatrixVector                    # reduced energies of each configuration
-  π::Vector{Float64}                 # marginal probabilities
-  f::Vector{Float64}                 # free energies
-  O::Matrix{Float64}                 # overlap matrix
+  m::Int                     # number of states
+  u::MatrixVector            # reduced energies of each configuration at all states
+  P::MatrixVector            # probabilities of each configuration at all states
+  π::Vector{Float64}         # marginal probabilities
+  f::Vector{Float64}         # free energies
+  O::Matrix{Float64}         # overlap matrix
   B0⁺::SymmetricMatrix
   Θ::SymmetricMatrix
 
   function Case(title::String; verbose::Bool = false)
     verbose && info( "Creating empty MICS case: ", title )
-    new( title, verbose, Vector{State}(), false, 0 )
+    new( title, verbose, Vector{State}(), 0 )
   end
 
   Case() = Case( "Untitled" )
@@ -78,7 +76,6 @@ function add!( case::Case, sample::DataFrame, potential::Function,
     error( "trying to add inconsistent data" )
   push!( case.state, State( sample, potential, autocorr ) )
   case.m += 1
-  case.upToDate = false
 end
 
 
@@ -96,17 +93,17 @@ end
 
 
 """
-    overlapSampling( case )
+    overlapSampling( u )
 
 Uses the Overlap Sampling Method of Lee and Scott (1980) to compute free-energies of all
 `states` relative to first one.
 """
-function overlapSampling( case )
-  f = zeros(case.m)
-  u = case.u
-  seq = proximitySequence( [mean(u[i][:,i]) for i=1:case.m] )
+function overlapSampling( u::MatrixVector )
+  m = length(u)
+  f = zeros(m)
+  seq = proximitySequence( [mean(u[i][:,i]) for i=1:m] )
   i = 1
-  for j in seq[2:end]
+  for j in seq
     f[j] = f[i] + logMeanExp(0.5(u[j][:,j] - u[j][:,i])) - 
                   logMeanExp(0.5(u[i][:,i] - u[i][:,j]))
     i = j
@@ -169,7 +166,7 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
 
   # Allocate matrices and compute the reduced potentials:
   u = case.u = MatrixVector(m)
-  P = MatrixVector(m)
+  P = case.P = MatrixVector(m)
   for i = 1:m
     u[i] = Matrix{Float64}(n[i],m)
     P[i] = Matrix{Float64}(n[i],m)
@@ -179,8 +176,8 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   end
 
   # Newton-Raphson iterations:
-  f = case.f = overlapSampling( case )
-  verbose && info( "Initial free-energy guess:", f )
+  case.f = overlapSampling( u )
+  verbose && info( "Initial free-energy guess:", case.f )
 
   Δf = ones(m-1)
   iter = 0
@@ -190,9 +187,9 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
     p0 = [mean(P[j][:,i]) for i=1:m, j=1:m]*π
     B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
     Δf = B0[2:m,2:m]\(π - p0)[2:m]
-    f[2:m] += Δf
+    case.f[2:m] += Δf
   end
-  verbose && info( "Free energies after $(iter) iterations:", f )
+  verbose && info( "Free energies after $(iter) iterations:", case.f )
 
   # Computation of probability covariance matrix:
   compute_probabilities!( P, case.π, case.f, u )
@@ -209,17 +206,20 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   case.B0⁺ = Symmetric(V*D⁺*V')
   case.Θ = Symmetric(case.B0⁺*Σ0*case.B0⁺)
   verbose && info( "Free-energy covariance matrix:", full(case.Θ) )
-
-  case.upToDate = true
 end
 
 
 """
-    free_energies( case )
+    freeEnergies( case )
 """
 function freeEnergies( case::Case )
   δf = sqrt.([case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:case.m])
   return case.f, δf
 end
+
+
+#function reweightedFreeEnergy( case::Case, potential::Function )
+#  
+#end
 
 end
