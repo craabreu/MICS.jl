@@ -12,7 +12,6 @@ using DataFrames
 using Base.LinAlg.BLAS
 
 import Base.show
-import Base.mean
 
 include("auxiliary.jl")
 
@@ -160,7 +159,7 @@ end
 """
     compute!( case )
 """
-function compute( case::Case; tol::Float64 = 1.0e-8, priors::Vector{Float64} = [] )
+function compute( case::Case; tol::Float64 = 1.0e-8, priors = nothing )
 
   state = case.state
   verbose = case.verbose
@@ -178,9 +177,10 @@ function compute( case::Case; tol::Float64 = 1.0e-8, priors::Vector{Float64} = [
     end
   end
 
-  if isempty(priors)
+  if priors == nothing
 
     # Compute effective sample sizes:
+    Um = [mean(u[i],2) for i=1:m]
     Σb = [covarianceOBM(u[i],Um[i],state[i].b) for i=1:m]
     Σ1 = [covarianceOBM(u[i],Um[i],1) for i=1:m]
     neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
