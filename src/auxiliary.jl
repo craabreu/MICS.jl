@@ -24,4 +24,16 @@ function SumOfDeviationsPerBlock( y, ym, b )
   return B
 end
 
-
+function info( msg::String, val = nothing )
+  msg_color = "\033[1;36m"
+  val_color = "\033[0;36m"
+  no_color  = "\033[0m"
+  print( msg_color, msg )
+  if (isa(val,AbstractArray))
+    println( val_color )
+    Base.showarray( STDOUT, val, false; header=false )
+  elseif (val != nothing)
+    print( STDOUT, val_color, val )
+  end
+  println( no_color )
+end

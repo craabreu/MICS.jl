@@ -11,19 +11,31 @@ module MICS
 using DataFrames
 using Base.LinAlg.BLAS
 
-import Base.show
+import Base: show
 
 include("auxiliary.jl")
 
-const SymmetricMatrix = Symmetric{Float64,Matrix{Float64}}
+struct State
+  sample::DataFrame                  # properties of sampled configurations
+  potential::Function                # reduced potential function
+  autocorr::Function                 # autocorrelated function
+  n::Int                             # number of configurations
+  b::Int                             # block size
+  neff::Float64                      # effective sample size
 
-mutable struct State
-  sample::DataFrame          # properties of sampled configurations
-  potential::Function        # reduced potential function
-  n::Int                     # number of configurations
-  b::Int                     # block size
-  State(sample,potential,n) = new(sample,potential,n,round(Int,sqrt(n)))
+  function State( sample, potential, autocorr )
+    n = nrow(sample)
+    b = round(Int,sqrt(n))
+    y = evaluate( sample, [autocorr] )
+    ym = mean(y,1)
+    neff = n*covarianceOBM(y,ym)[1]/covarianceOBM(y,ym,b)[1]
+    isnan(neff) && error( "unable to determine effective sample size" )
+    new( sample, potential, autocorr, n, b, neff )
+  end
 end
+
+const MatrixVector = Vector{Matrix{Float64}}
+const SymmetricMatrix = Symmetric{Float64,Matrix{Float64}}
 
 mutable struct Case
   title::String
@@ -31,34 +43,22 @@ mutable struct Case
   state::Vector{State}
   upToDate::Bool                     # true if energies have been computed
   m::Int                             # number of states
-  u::Vector{Matrix{Float64}}
+  u::MatrixVector                    # reduced energies of each configuration
   π::Vector{Float64}                 # marginal probabilities
   f::Vector{Float64}                 # free energies
-  δ²f::Vector{Float64}               # free-energy square errors
   O::Matrix{Float64}                 # overlap matrix
   B0⁺::SymmetricMatrix
   Θ::SymmetricMatrix
 
-  Case() = new( "Untitled", false, Vector{State}(), 0, false )
-
   function Case(title::String; verbose::Bool = false)
     verbose && info( "Creating empty MICS case: ", title )
-    new( title, verbose, Vector{State}(), 0, false )
+    new( title, verbose, Vector{State}(), false, 0 )
   end
+
+  Case() = Case( "Untitled" )
 end
 
-#-------------------------------------------------------------------------------------------
-function info( msg::String, x )
-  println( "\033[1;36m", msg, "\033[0;36m")
-  if (isa(x,AbstractArray))
-    Base.showarray( STDOUT, x, false; header=false )
-  else
-    print( STDOUT, " ", x )
-  end
-  println("\033[0m")
-end
 
-#-------------------------------------------------------------------------------------------
 """
     add!( case, sample, potential )
 
@@ -66,46 +66,37 @@ Adds a `sample` of configurations distributed according to a given reduced `pote
 the specified MICS `case`.
 
 ## Arguments
-* `case::MICS.Case`: 
-* `sample::DataFrames.DataFrame`: 
-* `potential::Function`: 
+* `case`::`MICS.Case`: the MICS case to which the new sample will be added.
+* `sample`::`DataFrames.DataFrame`: 
+* `potential`::`Function`: 
+* `autocorr`::`Function`:
 """
-function add!( case::Case, sample::DataFrame, potential::Function )
-  n = size(sample,1)
-  case.verbose &&
-    info( "Adding new state to MICS case $(case.title ): ", "$(n) configurations" )
+function add!( case::Case, sample::DataFrame, potential::Function,
+               autocorr::Function = potential )
+  case.verbose && info( "Adding new state to MICS case \"$(case.title)\"" )
   case.m == 0 || names(sample) == names(case.state[1].sample) ||
     error( "trying to add inconsistent data" )
-#  b = round(Int32,sqrt(n))
-  push!( case.state, State(sample,potential,n) )
+  push!( case.state, State( sample, potential, autocorr ) )
   case.m += 1
   case.upToDate = false
 end
 
-#-------------------------------------------------------------------------------------------
+
 """
     covarianceOBM( y, ym, b )
 
 Performs Overlap Batch Mean (OBM) covariance analysis with the data stored in matrix `y`,
 assuming a block size `b`.
 """
-function covarianceOBM( y, ym, b )
-  S = SumOfDeviationsPerBlock( y, ym, b )          # Blockwise sum of deviations
-  n = size(y,1) - b                                # Number of blocks minus 1
-  return Symmetric(syrk('U', 'T', 1.0/(b*n*(n+1)), S))    # Covariance matrix
-end
-
-function OBM( y, b )
-  ym = mean(ym,2)
+function covarianceOBM( y, ym, b::Int = 1 )
   S = SumOfDeviationsPerBlock( y, ym, b )
-  n = size(y,1)
-  Σ = syrk('U', 'T', 1.0/(b*(n-b)*(n-b+1)), S)
-  return vec(ym), Symmetric(Σ)
+  nmb = size(y,1) - b
+  return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
 end
 
-#-------------------------------------------------------------------------------------------
+
 """
-    overlapSampling( states )
+    overlapSampling( case )
 
 Uses the Overlap Sampling Method of Lee and Scott (1980) to compute free-energies of all
 `states` relative to first one.
@@ -123,29 +114,35 @@ function overlapSampling( case )
   return f
 end
 
-#-------------------------------------------------------------------------------------------
-function evaluate( case::Case, func::Vector{Function} )
-  m = case.m
-  n = length(func)
-  f = Vector{Matrix{Float64}}(m)
-  for (i,S) in enumerate(case.state)
-    f[i] = Matrix{Float64}(S.n,n)
-    for j = 1:n
-      f[i][:,j] = func[j]( S.sample )
-    end
+
+"""
+    evaluate( sample, func )
+"""
+function evaluate( sample::DataFrame, func::Vector{T} ) where T <: Function
+  n = nrow(sample)
+  m = length(func)
+  f = Matrix{Float64}(n,m)
+  for j = 1:m
+    f[:,j] = func[j]( sample )
   end
   return f
 end
 
-#-------------------------------------------------------------------------------------------
-function mics( case::Case, X::Vector{Matrix{Float64}} )
+
+"""
+    mics( case, X )
+"""
+function mics( case::Case, X::MatrixVector )
   Xm = [mean(X[i],1) for i=1:case.m]
   x0 = sum(case.π .* Xm)
   Σ0 = sum(case.π[i]^2 * covarianceOBM(X[i],Xm[i],case.state[i].b) for i=1:case.m)
   return vec(x0), Symmetric(Σ0), Xm
 end
 
-#-------------------------------------------------------------------------------------------
+
+"""
+    compute_probabilities!( P, π, f, u )
+"""
 function compute_probabilities!( P, π, f, u )
   g = (f + log.(π))'
   for i = 1:length(P)
@@ -155,20 +152,24 @@ function compute_probabilities!( P, π, f, u )
   end
 end
 
-#-------------------------------------------------------------------------------------------
+
 """
-    compute!( case )
+    update!( case )
 """
-function compute( case::Case; tol::Float64 = 1.0e-8, priors = nothing )
+function update( case::Case; tol::Float64 = 1.0e-8 )
 
   state = case.state
   verbose = case.verbose
   m = case.m
   n = [state[i].n for i=1:m]
 
+  # Compute marginal state probabilities:
+  π = case.π = [state[i].neff for i=1:m]/sum(state[i].neff for i=1:m)
+  verbose && info( "Marginal state probabilities: ", π )
+
   # Allocate matrices and compute the reduced potentials:
-  u = case.u = Vector{Matrix{Float64}}(m)
-  P = Vector{Matrix{Float64}}(m)
+  u = case.u = MatrixVector(m)
+  P = MatrixVector(m)
   for i = 1:m
     u[i] = Matrix{Float64}(n[i],m)
     P[i] = Matrix{Float64}(n[i],m)
@@ -176,26 +177,6 @@ function compute( case::Case; tol::Float64 = 1.0e-8, priors = nothing )
       u[i][:,j] = state[j].potential( state[i].sample )
     end
   end
-
-  if priors == nothing
-
-    # Compute effective sample sizes:
-    Um = [mean(u[i],2) for i=1:m]
-    Σb = [covarianceOBM(u[i],Um[i],state[i].b) for i=1:m]
-    Σ1 = [covarianceOBM(u[i],Um[i],1) for i=1:m]
-    neff = [n[i]*eigmax(Σ1[i])/eigmax(Σb[i]) for i=1:m]
-    verbose && info( "Effective sample sizes: ", neff )
-
-    # Compute marginal state probabilities:
-    π = case.π = neff/sum(neff)
-
-  else
-
-    length(priors) == m || error( "wrong number of specified priors" )
-    π = case.π = priors/sum(priors)
-
-  end
-  verbose && info( "Marginal state probabilities: ", π )
 
   # Newton-Raphson iterations:
   f = case.f = overlapSampling( case )
@@ -229,12 +210,16 @@ function compute( case::Case; tol::Float64 = 1.0e-8, priors = nothing )
   case.Θ = Symmetric(case.B0⁺*Σ0*case.B0⁺)
   verbose && info( "Free-energy covariance matrix:", full(case.Θ) )
 
-  # Computation of free-energy uncertainties:
-  case.δ²f = [case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:m]
-  verbose && info( "Free-energy uncertainties:", sqrt.(case.δ²f) )
-
   case.upToDate = true
 end
 
-#-------------------------------------------------------------------------------------------
+
+"""
+    free_energies( case )
+"""
+function freeEnergies( case::Case )
+  δf = sqrt.([case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:case.m])
+  return case.f, δf
+end
+
 end
