@@ -26,7 +26,7 @@ struct State
     b = round(Int,sqrt(n))
     y = evaluate( [autocorr], sample )
     ym = mean(y,1)
-    neff = n*covarianceOBM(y,ym)[1]/covarianceOBM(y,ym,b)[1]
+    neff = n*covariance(y,ym)[1]/covariance(y,ym,b)[1]
     isnan(neff) && error( "unable to determine effective sample size" )
     new( sample, potential, autocorr, n, b, neff )
   end
@@ -81,15 +81,29 @@ end
 
 
 """
-    covarianceOBM( y, ym, b )
+    covariance( y, ym, b )
 
 Performs Overlap Batch Mean (OBM) covariance analysis with the data stored in matrix `y`,
 assuming a block size `b`.
 """
-function covarianceOBM( y, ym, b::Int = 1 )
+function covariance( y, ym, b::Int = 1 )
   S = SumOfDeviationsPerBlock( y, ym, b )
   nmb = size(y,1) - b
   return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
+end
+
+
+"""
+    covariance( y, ym, z, zm, b )
+
+Performs Overlap Batch Mean (OBM) cross-covariance analysis with the data stored in matrices
+`y` and `z`, assuming a block size `b`.
+"""
+function covariance( y, ym, z, zm, b::Int = 1 )
+  Sy = SumOfDeviationsPerBlock( y, ym, b )
+  Sz = SumOfDeviationsPerBlock( z, zm, b )
+  nmb = size(y,1) - b
+  return gemm('T', 'N', 1.0/(b*nmb*(nmb+1)), Sy, Sz)
 end
 
 
@@ -117,15 +131,15 @@ end
     evaluate( func, sample )
 """
 function evaluate( func::Vector{T}, sample::DataFrame ) where T <: Function
-  n = nrow(sample)
   m = length(func)
-  f = Matrix{Float64}(n,m)
+  f = Matrix{Float64}(nrow(sample),m)
   for j = 1:m
     f[:,j] = func[j]( sample )
   end
   return f
 end
 
+evaluate( func, case ) = [evaluate( func, case.state[i].sample ) for i=1:case.m]
 
 """
     mics( case, X )
@@ -133,15 +147,15 @@ end
 function mics( case::Case, X::MatrixVector )
   Xm = [mean(X[i],1) for i=1:case.m]
   x0 = sum(case.π .* Xm)
-  Σ0 = sum(case.π[i]^2 * covarianceOBM(X[i],Xm[i],case.state[i].b) for i=1:case.m)
+  Σ0 = sum(case.π[i]^2 * covariance(X[i],Xm[i],X[i],Xm[i],case.state[i].b) for i=1:case.m)
   return vec(x0), Symmetric(Σ0), Xm
 end
 
 
 """
-    computeProbabilities!( P, π, f, u )
+    compute!( P, π, f, u )
 """
-function computeProbabilities!( P, π, f, u )
+function compute!( P, π, f, u )
   g = (f + log.(π))'
   for i = 1:length(P)
     a = g .- u[i]
@@ -152,9 +166,9 @@ end
 
 
 """
-    computeEnergiesAndProbabilities!( u0, P, π, f, u )
+    compute!( u0, P, π, f, u )
 """
-function computeEnergiesAndProbabilities!( u0, P, π, f, u )
+function compute!( u0, P, π, f, u )
   g = (f + log.(π))'
   for i = 1:length(P)
     a = g .- u[i]
@@ -182,8 +196,7 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   verbose && info( "Mixture composition: ", π )
 
   # Compute reduced potentials:
-  potentials = [state[i].potential for i=1:m]
-  u = case.u = [evaluate( potentials, state[i].sample ) for i=1:m]
+  u = case.u = evaluate( [state[i].potential for i=1:m], case )
 
   # Allocate matrices:
   P = case.P = MatrixVector(m)
@@ -202,7 +215,7 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   iter = 0
   while any(abs.(Δf) .> tol)
     iter += 1
-    computeProbabilities!( P, case.π, case.f, u )
+    compute!( P, case.π, case.f, u )
     p0 = [mean(P[j][:,i]) for i=1:m, j=1:m]*π
     B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
     Δf = B0[2:m,2:m]\(π - p0)[2:m]
@@ -211,7 +224,7 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   verbose && info( "Free energies after $(iter) iterations:", case.f )
 
   # Computation of probability covariance matrix:
-  computeEnergiesAndProbabilities!( u0, P, case.π, case.f, u )
+  compute!( u0, P, case.π, case.f, u )
   p0, Σ0, pm = mics( case, P )
   B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
 
