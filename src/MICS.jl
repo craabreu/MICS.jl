@@ -11,242 +11,189 @@ module MICS
 using DataFrames
 using Base.LinAlg.BLAS
 
-include("auxiliary.jl")
+export State,
+       Mixture,
+       covariance
 
+include("aux.jl")
+
+"""
+    struct State
+
+An equilibrium state aimed to enroll in a MICS analysis
+"""
 struct State
   sample::DataFrame          # properties of sampled configurations
   potential::Function        # reduced potential function
   autocorr::Function         # autocorrelated function
   n::Int                     # number of configurations
   b::Int                     # block size
-  neff::Float64              # effective sample size
-
-  function State( sample, potential, autocorr )
-    n = nrow(sample)
-    b = round(Int,sqrt(n))
-    y = evaluate( [autocorr], sample )
-    ym = mean(y,1)
-    neff = n*covariance(y,ym)[1]/covariance(y,ym,b)[1]
-    isnan(neff) && error( "unable to determine effective sample size" )
-    new( sample, potential, autocorr, n, b, neff )
-  end
+  neff::Int                  # effective sample size
 end
 
-const MatrixVector = Vector{Matrix{Float64}}
-const SymmetricMatrix = Symmetric{Float64,Matrix{Float64}}
+"""
+# Constructor
 
-mutable struct Case
+    State( sample, potential[, autocorr] )
+
+# Arguments
+
+* `sample::DataFrames.DataFrame`: a data frame whose rows represent to configurations
+                                  sampled according to a given probability distribution and
+                                  whose columns contain a number of properties evaluated for
+                                  such configurations.
+* `potential::Function`: the reduced potential that defines the equilibrium state. It must
+                         be a function that receives `x::DataFrame` and returns `u::T`,
+                         where `T<:AbstractArray{Float64,1}` and `length(u) == nrow(x)`.
+* `autocorr::Function=potential`: a function similar to `potential`, but returning some
+                                  autocorrelated property to be used for determining the
+                                  effective sample size.
+"""
+function State( sample, potential, autocorr=potential )
+  n = nrow(sample)
+  b = round(Int,sqrt(n))
+  y = evaluate( [autocorr], sample )
+  neff = n*covariance(y,1)[1]/covariance(y,b)[1]
+  isfinite(neff) || error( "unable to determine effective sample size" )
+  State( sample, potential, autocorr, n, b, round(Int,neff) )
+end
+
+"""
+    struct Mixture
+
+A mixture of independently collected samples (MICS)
+"""
+struct Mixture
   title::String
-  verbose::Bool
   state::Vector{State}
-  m::Int                     # number of states
-  u::MatrixVector            # reduced energies of each configuration at all states
-  P::MatrixVector            # probabilities of each configuration at all states
-  π::Vector{Float64}         # mixture composition
-  f::Vector{Float64}         # free energy of each state
-  u0::MatrixVector           # reduced energy of each configuration at the mixture state
-  O::Matrix{Float64}         # overlap matrix
-  B0⁺::SymmetricMatrix
-  Θ::SymmetricMatrix
-
-  function Case(title::String; verbose::Bool = false)
-    verbose && info( "Creating empty MICS case: ", title )
-    new( title, verbose, Vector{State}(), 0 )
-  end
-
-  Case() = Case( "Untitled" )
+  names::Vector{Symbol}
+  m::Int                       # number of states
+  n::Vector{Int}               # sample size at each state
+  u::Vector{Matrix{Float64}}   # reduced energies of each configuration at all states
+  π::Vector{Float64}           # mixture composition
+  f::Vector{Float64}           # free energy of each state
+  P::Vector{Matrix{Float64}}   # probabilities of each configuration at all states
+  u0::Vector{Matrix{Float64}}  # reduced energy of each configuration at the mixture state
+  B0⁺::Matrix{Float64}
+  Θ::Matrix{Float64}
 end
 
-
 """
-    add!( case, sample, potential )
+# Constructor
 
-Adds a `sample` of configurations distributed according to a given reduced `potential` to
-the specified MICS `case`.
+    Mixture( states; <keyword arguments> )
 
-## Arguments
-* `case`::`MICS.Case`: the MICS case to which the new sample will be added.
-* `sample`::`DataFrames.DataFrame`: 
-* `potential`::`Function`: 
-* `autocorr`::`Function`:
+# Arguments
+
+* `states::MICS.Vector{State}`: 
+* `title::String=\"Untitled\"`: 
+* `verbose::Bool=false`:
+* `tol::Float64=1.0E-8`:
 """
-function add!( case::Case, sample::DataFrame, potential::Function,
-               autocorr::Function = potential )
-  case.verbose && info( "Adding new state to MICS case \"$(case.title)\"" )
-  case.m == 0 || names(sample) == names(case.state[1].sample) ||
-    error( "trying to add inconsistent data" )
-  push!( case.state, State( sample, potential, autocorr ) )
-  case.m += 1
-end
+function Mixture( states::Vector{State}; title::String = "Untitled",
+                  verbose::Bool = false, tol::Float64 = 1.0E-8 )
 
+  verbose && aux.info( "Setting up MICS case: ", title )
 
-"""
-    covariance( y, ym, b )
+  m = length(states)
+  verbose && aux.info( "Number of states: ", m )
+  m == 0 && error( "state set is empty" )
 
-Performs Overlap Batch Mean (OBM) covariance analysis with the data stored in matrix `y`,
-assuming a block size `b`.
-"""
-function covariance( y, ym, b::Int = 1 )
-  S = SumOfDeviationsPerBlock( y, ym, b )
-  nmb = size(y,1) - b
-  return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
-end
+  properties = names(states[1].sample)
+  verbose && aux.info( "Properties: ", aux.str(properties) )
+  all([all(names(states[i].sample) .== properties) for i=1:m]) ||
+    error( "inconsistent data" )
 
+  n = [nrow(states[i].sample) for i=1:m]
+  verbose && aux.info( "Sample sizes: ", aux.str(n) )
 
-"""
-    covariance( y, ym, z, zm, b )
+  neff = [states[i].neff for i=1:m]
+  verbose && aux.info( "Effective sample sizes: ", aux.str(neff) )
 
-Performs Overlap Batch Mean (OBM) cross-covariance analysis with the data stored in matrices
-`y` and `z`, assuming a block size `b`.
-"""
-function covariance( y, ym, z, zm, b::Int = 1 )
-  Sy = SumOfDeviationsPerBlock( y, ym, b )
-  Sz = SumOfDeviationsPerBlock( z, zm, b )
-  nmb = size(y,1) - b
-  return gemm('T', 'N', 1.0/(b*nmb*(nmb+1)), Sy, Sz)
-end
+  π = neff/sum(neff)
+  verbose && aux.info( "Mixture composition: ", π )
 
+  potentials = [states[i].potential for i=1:m]
+  u = [evaluate(potentials, states[i].sample) for i=1:m]
 
-"""
-    overlapSampling( u )
-
-Uses the Overlap Sampling Method of Lee and Scott (1980) to compute free-energies of all
-`states` relative to first one.
-"""
-function overlapSampling( u::MatrixVector )
-  m = length(u)
-  f = zeros(m)
-  seq = proximitySequence( [mean(u[i][:,i]) for i=1:m] )
-  i = 1
-  for j in seq
-    f[j] = f[i] + logMeanExp(0.5(u[j][:,j] - u[j][:,i])) - 
-                  logMeanExp(0.5(u[i][:,i] - u[i][:,j]))
-    i = j
-  end
-  return f
-end
-
-
-"""
-    evaluate( func, sample )
-"""
-function evaluate( func::Vector{T}, sample::DataFrame ) where T <: Function
-  m = length(func)
-  f = Matrix{Float64}(nrow(sample),m)
-  for j = 1:m
-    f[:,j] = func[j]( sample )
-  end
-  return f
-end
-
-evaluate( func, case ) = [evaluate( func, case.state[i].sample ) for i=1:case.m]
-
-"""
-    mics( case, X )
-"""
-function mics( case::Case, X::MatrixVector )
-  Xm = [mean(X[i],1) for i=1:case.m]
-  x0 = sum(case.π .* Xm)
-  Σ0 = sum(case.π[i]^2 * covariance(X[i],Xm[i],X[i],Xm[i],case.state[i].b) for i=1:case.m)
-  return vec(x0), Symmetric(Σ0), Xm
-end
-
-
-"""
-    compute!( P, π, f, u )
-"""
-function compute!( P, π, f, u )
-  g = (f + log.(π))'
-  for i = 1:length(P)
-    a = g .- u[i]
-    b = exp.(a .- maximum(a,2))
-    P[i] = b ./ sum(b,2)
-  end
-end
-
-
-"""
-    compute!( u0, P, π, f, u )
-"""
-function compute!( u0, P, π, f, u )
-  g = (f + log.(π))'
-  for i = 1:length(P)
-    a = g .- u[i]
-    max = maximum(a,2)
-    numer = exp.(a .- max)
-    denom = sum(numer,2)
-    P[i] = numer ./ denom
-    u0[i] = max + log.(denom)
-  end
-end
-
-
-"""
-    update!( case )
-"""
-function update( case::Case; tol::Float64 = 1.0e-8 )
-
-  state = case.state
-  verbose = case.verbose
-  m = case.m
-  n = [state[i].n for i=1:m]
-
-  # Compute mixture composition:
-  π = case.π = [state[i].neff for i=1:m]/sum(state[i].neff for i=1:m)
-  verbose && info( "Mixture composition: ", π )
-
-  # Compute reduced potentials:
-  u = case.u = evaluate( [state[i].potential for i=1:m], case )
-
-  # Allocate matrices:
-  P = case.P = MatrixVector(m)
-  u0 = case.u0 = MatrixVector(m)
+  P = Vector{Matrix{Float64}}(m)
+  u0 = Vector{Matrix{Float64}}(m)
   for i = 1:m
     P[i] = Matrix{Float64}(n[i],m)
     u0[i] = Matrix{Float64}(n[i],1)
   end
 
-  # Initial guess:
-  case.f = overlapSampling( u )
-  verbose && info( "Initial free-energy guess:", case.f )
+  f = aux.overlapSampling( u )
+  verbose && aux.info( "Initial free-energy guess:", f )
 
-  # Newton-Raphson iterations:
-  Δf = ones(m-1)
-  iter = 0
+  iter = 1
+  aux.compute!( u0, P, π, f, u )
+  p0 = [mean(P[j][:,i]) for i=1:m, j=1:m]*π
+  B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
+  Δf = B0[2:m,2:m]\(π - p0)[2:m]
   while any(abs.(Δf) .> tol)
     iter += 1
-    compute!( P, case.π, case.f, u )
+    f[2:m] += Δf
+    aux.compute!( u0, P, π, f, u )
     p0 = [mean(P[j][:,i]) for i=1:m, j=1:m]*π
     B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
     Δf = B0[2:m,2:m]\(π - p0)[2:m]
-    case.f[2:m] += Δf
   end
-  verbose && info( "Free energies after $(iter) iterations:", case.f )
+  verbose && aux.info( "Free energies after $(iter) iterations:", f )
 
-  # Computation of probability covariance matrix:
-  compute!( u0, P, case.π, case.f, u )
-  p0, Σ0, pm = mics( case, P )
-  B0 = Symmetric(diagm(p0) - sum(syrk('U', 'T', π[i]/n[i], P[i]) for i=1:m))
-
-  # Compute overlap matrix:
-  case.O = [pm[j][i] for i=1:m, j=1:m]
-  verbose && info( "Overlap matrix:", case.O )
-
-  # Computation of free-energy covariance matrix:
   (D, V) = eig(B0)
   D⁺ = diagm(map(x-> abs(x) < tol ? 0.0 : 1.0/x, D))
-  case.B0⁺ = Symmetric(V*D⁺*V')
-  case.Θ = Symmetric(case.B0⁺*Σ0*case.B0⁺)
-  verbose && info( "Free-energy covariance matrix:", full(case.Θ) )
+  B0⁺ = Symmetric(V*D⁺*V')
+  Σ0 = sum(π[i]^2*covariance(P[i],states[i].b) for i=1:m)
+  Θ = Symmetric(B0⁺*Σ0*B0⁺)
+  verbose && aux.info( "Free-energy covariance matrix:", full(Θ) )
+
+  Mixture( title, states, properties, m, n, u, π, f, P, u0, B0⁺, Θ )
 end
 
+"""
+    covariance( y, b )
+
+Performs Overlap Batch Mean (OBM) covariance analysis with the data stored in matrix `y`,
+assuming a block size `b`.
+"""
+function covariance( y::Matrix{T}, b::Integer ) where T<:AbstractFloat
+  S = aux.SumOfDeviationsPerBlock( y, b )
+  nmb = size(y,1) - b
+  return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
+end
 
 """
-    freeEnergies( case )
+    crossCovariance( y, z, b )
+
+Performs Overlap Batch Mean (OBM) cross-covariance analysis with the data stored in matrices
+`y` and `z`, assuming a block size `b`.
 """
-function freeEnergies( case::Case )
-  δf = sqrt.([case.Θ[i,i] - 2*case.Θ[i,1] + case.Θ[1,1] for i=1:case.m])
-  return case.f, δf
+function covariance( y::Matrix{T}, z::Matrix{T}, b::Integer ) where T<:AbstractFloat
+  Sy = SumOfDeviationsPerBlock( y, b )
+  Sz = SumOfDeviationsPerBlock( z, b )
+  nmb = size(y,1) - b
+  return gemm('T', 'N', 1.0/(b*nmb*(nmb+1)), Sy, Sz)
+end
+
+"""
+    evaluate( functions, sample )
+"""
+function evaluate( functions::Vector{T}, sample::DataFrame ) where T <: Function
+  m = length(functions)
+  f = Matrix{Float64}(nrow(sample),m)
+  for j = 1:m
+    f[:,j] = functions[j]( sample )
+  end
+  return f
+end
+
+"""
+    freeEnergies( mixture )
+"""
+function freeEnergies( mixture::Mixture )
+  δf = sqrt.([mixture.Θ[i,i] - 2*mixture.Θ[i,1] + mixture.Θ[1,1] for i=1:case.m])
+  return mixture.f, δf
 end
 
 

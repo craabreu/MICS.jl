@@ -3,13 +3,13 @@ using DataFrames
 using CSV
 using Base.Test
 
-case = MICS.Case( "Test"; verbose=true )
 β = 1.6773985789
-MICS.add!( case, readtable("log_1.dat",separator=' '), x->β*x[:E1] )
-MICS.add!( case, readtable("log_2.dat",separator=' '), x->β*x[:E2] )
-MICS.add!( case, readtable("log_3.dat",separator=' '), x->β*x[:E3] )
-MICS.add!( case, readtable("log_4.dat",separator=' '), x->β*x[:E4] )
 
-@time MICS.compute( case )
+states = Vector{State}()
+push!( states, State( readtable("log_1.dat",separator=' '), x->β*x[:E1], x->β*x[:E2]) )
+push!( states, State( readtable("log_2.dat",separator=' '), x->β*x[:E2]) )
+push!( states, State( readtable("log_3.dat",separator=' '), x->β*x[:E3]) )
+push!( states, State( readtable("log_4.dat",separator=' '), x->β*x[:E4]) )
 
-#@test 1 == 2
+@time mixture = Mixture( states; title = "Test", verbose=true )
+
