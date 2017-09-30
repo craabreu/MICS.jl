@@ -24,7 +24,7 @@ struct State
   function State( sample, potential, autocorr )
     n = nrow(sample)
     b = round(Int,sqrt(n))
-    y = evaluate( sample, [autocorr] )
+    y = evaluate( [autocorr], sample )
     ym = mean(y,1)
     neff = n*covarianceOBM(y,ym)[1]/covarianceOBM(y,ym,b)[1]
     isnan(neff) && error( "unable to determine effective sample size" )
@@ -114,9 +114,9 @@ end
 
 
 """
-    evaluate( sample, func )
+    evaluate( func, sample )
 """
-function evaluate( sample::DataFrame, func::Vector{T} ) where T <: Function
+function evaluate( func::Vector{T}, sample::DataFrame ) where T <: Function
   n = nrow(sample)
   m = length(func)
   f = Matrix{Float64}(n,m)
@@ -181,23 +181,23 @@ function update( case::Case; tol::Float64 = 1.0e-8 )
   π = case.π = [state[i].neff for i=1:m]/sum(state[i].neff for i=1:m)
   verbose && info( "Mixture composition: ", π )
 
-  # Allocate matrices and compute the reduced potentials:
-  u = case.u = MatrixVector(m)
+  # Compute reduced potentials:
+  potentials = [state[i].potential for i=1:m]
+  u = case.u = [evaluate( potentials, state[i].sample ) for i=1:m]
+
+  # Allocate matrices:
   P = case.P = MatrixVector(m)
   u0 = case.u0 = MatrixVector(m)
   for i = 1:m
-    u[i] = Matrix{Float64}(n[i],m)
     P[i] = Matrix{Float64}(n[i],m)
     u0[i] = Matrix{Float64}(n[i],1)
-    for j = 1:m
-      u[i][:,j] = state[j].potential( state[i].sample )
-    end
   end
 
-  # Newton-Raphson iterations:
+  # Initial guess:
   case.f = overlapSampling( u )
   verbose && info( "Initial free-energy guess:", case.f )
 
+  # Newton-Raphson iterations:
   Δf = ones(m-1)
   iter = 0
   while any(abs.(Δf) .> tol)
@@ -237,8 +237,12 @@ function freeEnergies( case::Case )
 end
 
 
-#function reweightedFreeEnergy( case::Case, potential::Function )
-#  
+#function reweight( case::Case, potential::Function, variable::Function )
+#  m = case.m
+#  state = case.state
+#  u = 
+#  y = [evaluate(state[i].sample,[potential,variable]) for i=1:m]
+#  @show y
 #end
 
 end
