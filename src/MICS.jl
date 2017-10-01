@@ -22,7 +22,7 @@ include("aux.jl")
 """
     struct State
 
-An equilibrium state aimed to enroll in a MICS analysis
+An equilibrium state aimed to be part of a mixture of independently collected samples (MICS)
 """
 struct State
   sample::DataFrame          # properties of sampled configurations
@@ -38,18 +38,22 @@ end
 
     State( sample, potential[, autocorr] )
 
-# Arguments
+## Arguments
 
 * `sample::DataFrames.DataFrame`: a data frame whose rows represent configurations sampled
-                                  according to a given probability distribution and whose
-                                  columns contain a number of properties evaluated for such
-                                  configurations.
+     according to a given probability distribution and whose columns contain a number of
+     properties evaluated for such configurations.
 * `potential::Function`: the reduced potential that defines the equilibrium state. This
-                         function must receive `x::DataFrames.DataFrame` and return `u::T`,
-                         where `T<:AbstractArray{Float64,1}` and `length(u) == nrow(x)`.
+     function might for instance receive `x` and return the result of an element-wise
+     calculation involving `x[:a]`, `x[:b]`, etc, with `a`, `b`, etc being names of
+     properties in `sample`.
 * `autocorr::Function=potential`: a function similar to `potential`, but whose result is an
-                                  autocorrelated property to be used for determining the
-                                  effective sample size.
+     autocorrelated property to be used for determining the effective sample size.
+
+## Note
+
+Formally, functions `potential` and `autocorr` must receive `x::DataFrames.DataFrame` and
+return `y::T`, where `T<:AbstractArray{Float64,1}` with `length(y) == nrow(x)`.
 """
 function State( sample, potential, autocorr=potential )
   n = nrow(sample)
@@ -84,9 +88,9 @@ end
 
     Mixture( states; <keyword arguments> )
 
-# Arguments
+## Arguments
 
-* `states::MICS.Vector{State}`: 
+* `states::Vector{MICS.State}`: 
 * `title::String=\"Untitled\"`: 
 * `verbose::Bool=false`:
 * `tol::Float64=1.0E-8`:
@@ -190,8 +194,9 @@ Applies an array of `functions` to a data `frame` and returns a matrix whose num
 is the same as in `frame` and the number of columns is equal to the length of `functions`.
 
 # Note
-Each function of the array must receive `x::DataFrames.DataFrame` and return `y::T`, where
-`T<:AbstractArray{Float64,1}` and `length(y) == nrow(x)`.
+Each function of the array might for instance receive `x` and return the result of an
+element-wise calculation involving `x[:a]`, `x[:b]`, etc, with `a`, `b`, etc being names of
+properties in `frame`.
 
 # Example
 ```jldoctest
@@ -218,14 +223,5 @@ function multimap( functions::Array{T}, frame::DataFrame ) where T <: Function
   end
   return f
 end
-
-
-#function reweight( case::Case, potential::Function, variable::Function )
-#  m = case.m
-#  state = case.state
-#  u = 
-#  y = [multimap(state[i].sample,[potential,variable]) for i=1:m]
-#  @show y
-#end
 
 end
