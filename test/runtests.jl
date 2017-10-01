@@ -13,3 +13,6 @@ push!( states, State( readtable("log_4.dat",separator=' '), x->β*x[:E4]) )
 
 @time mixture = Mixture( states; title = "Test", verbose=true )
 
+@time f, δf = freeEnergies( mixture )
+
+

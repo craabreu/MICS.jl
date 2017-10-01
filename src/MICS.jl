@@ -13,7 +13,9 @@ using Base.LinAlg.BLAS
 
 export State,
        Mixture,
-       covariance
+       freeEnergies,
+       covariance,
+       multimap
 
 include("aux.jl")
 
@@ -38,21 +40,21 @@ end
 
 # Arguments
 
-* `sample::DataFrames.DataFrame`: a data frame whose rows represent to configurations
-                                  sampled according to a given probability distribution and
-                                  whose columns contain a number of properties evaluated for
-                                  such configurations.
-* `potential::Function`: the reduced potential that defines the equilibrium state. It must
-                         be a function that receives `x::DataFrame` and returns `u::T`,
+* `sample::DataFrames.DataFrame`: a data frame whose rows represent configurations sampled
+                                  according to a given probability distribution and whose
+                                  columns contain a number of properties evaluated for such
+                                  configurations.
+* `potential::Function`: the reduced potential that defines the equilibrium state. This
+                         function must receive `x::DataFrames.DataFrame` and return `u::T`,
                          where `T<:AbstractArray{Float64,1}` and `length(u) == nrow(x)`.
-* `autocorr::Function=potential`: a function similar to `potential`, but returning some
+* `autocorr::Function=potential`: a function similar to `potential`, but whose result is an
                                   autocorrelated property to be used for determining the
                                   effective sample size.
 """
 function State( sample, potential, autocorr=potential )
   n = nrow(sample)
   b = round(Int,sqrt(n))
-  y = evaluate( [autocorr], sample )
+  y = multimap( [autocorr], sample )
   neff = n*covariance(y,1)[1]/covariance(y,b)[1]
   isfinite(neff) || error( "unable to determine effective sample size" )
   State( sample, potential, autocorr, n, b, round(Int,neff) )
@@ -69,7 +71,6 @@ struct Mixture
   names::Vector{Symbol}
   m::Int                       # number of states
   n::Vector{Int}               # sample size at each state
-  u::Vector{Matrix{Float64}}   # reduced energies of each configuration at all states
   π::Vector{Float64}           # mixture composition
   f::Vector{Float64}           # free energy of each state
   P::Vector{Matrix{Float64}}   # probabilities of each configuration at all states
@@ -114,7 +115,7 @@ function Mixture( states::Vector{State}; title::String = "Untitled",
   verbose && aux.info( "Mixture composition: ", π )
 
   potentials = [states[i].potential for i=1:m]
-  u = [evaluate(potentials, states[i].sample) for i=1:m]
+  u = [multimap(potentials, states[i].sample) for i=1:m]
 
   P = Vector{Matrix{Float64}}(m)
   u0 = Vector{Matrix{Float64}}(m)
@@ -148,14 +149,26 @@ function Mixture( states::Vector{State}; title::String = "Untitled",
   Θ = Symmetric(B0⁺*Σ0*B0⁺)
   verbose && aux.info( "Free-energy covariance matrix:", full(Θ) )
 
-  Mixture( title, states, properties, m, n, u, π, f, P, u0, B0⁺, Θ )
+  Mixture( title, states, properties, m, n, π, f, P, u0, B0⁺, Θ )
 end
 
 """
-    covariance( y, b )
+    f, δf = freeEnergies( mixture )
 
-Performs Overlap Batch Mean (OBM) covariance analysis with the data stored in matrix `y`,
-assuming a block size `b`.
+Returns the relative free energies of the sampled states of a `mixture`, as well as their
+standard errors.
+"""
+function freeEnergies( mixture::Mixture )
+  δf = sqrt.([mixture.Θ[i,i] - 2*mixture.Θ[i,1] + mixture.Θ[1,1] for i=1:mixture.m])
+  return mixture.f, δf
+end
+
+"""
+    covariance( y,[ z,] b )
+
+Computes either the covariance matrix of the columns of matrix `y` among themselves or the
+cross-covariance matrix between the columns of matrix `y` with those of matrix `z`. The
+method of Overlap Batch Mean (OBM) is employed with blocks of size `b`.
 """
 function covariance( y::Matrix{T}, b::Integer ) where T<:AbstractFloat
   S = aux.SumOfDeviationsPerBlock( y, b )
@@ -163,12 +176,6 @@ function covariance( y::Matrix{T}, b::Integer ) where T<:AbstractFloat
   return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
 end
 
-"""
-    crossCovariance( y, z, b )
-
-Performs Overlap Batch Mean (OBM) cross-covariance analysis with the data stored in matrices
-`y` and `z`, assuming a block size `b`.
-"""
 function covariance( y::Matrix{T}, z::Matrix{T}, b::Integer ) where T<:AbstractFloat
   Sy = SumOfDeviationsPerBlock( y, b )
   Sz = SumOfDeviationsPerBlock( z, b )
@@ -177,23 +184,39 @@ function covariance( y::Matrix{T}, z::Matrix{T}, b::Integer ) where T<:AbstractF
 end
 
 """
-    evaluate( functions, sample )
+    multimap( functions, frame )
+
+Applies an array of `functions` to a data `frame` and returns a matrix whose number of rows
+is the same as in `frame` and the number of columns is equal to the length of `functions`.
+
+# Note
+Each function of the array must receive `x::DataFrames.DataFrame` and return `y::T`, where
+`T<:AbstractArray{Float64,1}` and `length(y) == nrow(x)`.
+
+# Example
+```jldoctest
+julia> df = DataFrame(a=rand(3),b=rand(3))
+3×2 DataFrames.DataFrame
+│ Row │ a         │ b        │
+├─────┼───────────┼──────────┤
+│ 1   │ 0.601568  │ 0.434138 │
+│ 2   │ 0.167932  │ 0.272908 │
+│ 3   │ 0.20209   │ 0.153349 │
+
+julia> multimap([x->x[:a]+x[:b],x->x[:a].*x[:b]],df)
+3×2 Array{Float64,2}:
+ 1.03571   0.261164 
+ 0.44084   0.04583  
+ 0.355439  0.0309902
+```
 """
-function evaluate( functions::Vector{T}, sample::DataFrame ) where T <: Function
+function multimap( functions::Array{T}, frame::DataFrame ) where T <: Function
   m = length(functions)
-  f = Matrix{Float64}(nrow(sample),m)
-  for j = 1:m
-    f[:,j] = functions[j]( sample )
+  f = Matrix{Float64}(nrow(frame),m)
+  for i in eachindex(functions)
+    f[:,i] = functions[i]( frame )
   end
   return f
-end
-
-"""
-    freeEnergies( mixture )
-"""
-function freeEnergies( mixture::Mixture )
-  δf = sqrt.([mixture.Θ[i,i] - 2*mixture.Θ[i,1] + mixture.Θ[1,1] for i=1:case.m])
-  return mixture.f, δf
 end
 
 
@@ -201,7 +224,7 @@ end
 #  m = case.m
 #  state = case.state
 #  u = 
-#  y = [evaluate(state[i].sample,[potential,variable]) for i=1:m]
+#  y = [multimap(state[i].sample,[potential,variable]) for i=1:m]
 #  @show y
 #end
 
