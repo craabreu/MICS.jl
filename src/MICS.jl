@@ -14,6 +14,7 @@ using Base.LinAlg.BLAS
 export State,
        Mixture,
        freeEnergies,
+       reweighting,
        covariance,
        multimap
 
@@ -27,7 +28,6 @@ An equilibrium state aimed to be part of a mixture of independently collected sa
 struct State
   sample::DataFrame          # properties of sampled configurations
   potential::Function        # reduced potential function
-  autocorr::Function         # autocorrelated function
   n::Int                     # number of configurations
   b::Int                     # block size
   neff::Int                  # effective sample size
@@ -61,7 +61,7 @@ function State( sample, potential, autocorr=potential )
   y = multimap( [autocorr], sample )
   neff = n*covariance(y,1)[1]/covariance(y,b)[1]
   isfinite(neff) || error( "unable to determine effective sample size" )
-  State( sample, potential, autocorr, n, b, round(Int,neff) )
+  State( sample, potential, n, b, round(Int,neff) )
 end
 
 """
@@ -157,15 +157,46 @@ function Mixture( states::Vector{State}; title::String = "Untitled",
 end
 
 """
-    f, δf = freeEnergies( mixture )
+    freeEnergies( mixture )
 
-Returns the relative free energies of the sampled states of a `mixture`, as well as their
-standard errors.
+Returns a data frame containing the relative free energies of the sampled states of a
+`mixture`, as well as their standard errors.
 """
 function freeEnergies( mixture::Mixture )
   δf = sqrt.([mixture.Θ[i,i] - 2*mixture.Θ[i,1] + mixture.Θ[1,1] for i=1:mixture.m])
-  return mixture.f, δf
+  return DataFrame( f = mixture.f, δf = δf )
 end
+
+"""
+    reweighting( mixture, functions, potentials )
+
+"""
+function reweighting( mixture::Mixture,
+                      properties::Union{Function,Vector{T1}} where T1<:Function,
+                      potentials::Vector{T2} where T2<:Function )
+  m = mixture.m
+  π = mixture.π
+  state = mixture.state
+
+  # Compute z so that z[i] contains a matrix of all properties evaluated for sample i:
+  z = [hcat(multimap( properties, state[i].sample ), ones(state[i].n)) for i=1:m]
+
+  # Carry out reweighting for every provided potential:
+  for k = 1:length(potentials)
+    Δu = [mixture.u0[i] - multimap( potentials[k], state[i].sample ) for i=1:m]
+    maxΔu = maximum([maximum(Δu[i]) for i=1:m])
+    y = [exp.(Δu[i] - maxΔu) .* z[i] for i=1:m]
+    ym = [mean(y[i],1) for i=1:m]
+    y0 = sum(π[i]*ym[i] for i=1:m)
+    @show y0
+  end
+end
+
+reweighting( mixture::Mixture, properties::Union{Function,Vector{T}} where T<:Function,
+             potential::Function ) = reweighting( mixture, properties, [potential] )
+
+#reweighting( mixture::Mixture, property::Function,
+#             potential::Union{Function,Vector{T}} where T<:Function ) = reweighting( mixture, properties, [potential] )
 
 """
     covariance( y,[ z,] b )
@@ -215,7 +246,7 @@ julia> multimap([x->x[:a]+x[:b],x->x[:a].*x[:b]],df)
  0.355439  0.0309902
 ```
 """
-function multimap( functions::Array{T}, frame::DataFrame ) where T <: Function
+function multimap( functions::Array{T} where T <: Function, frame::DataFrame )
   m = length(functions)
   f = Matrix{Float64}(nrow(frame),m)
   for i in eachindex(functions)
@@ -223,5 +254,7 @@ function multimap( functions::Array{T}, frame::DataFrame ) where T <: Function
   end
   return f
 end
+
+multimap( f::Function, frame::DataFrame ) = multimap( [f], frame )
 
 end
