@@ -59,7 +59,8 @@ function State( sample, potential, autocorr=potential )
   n = nrow(sample)
   b = round(Int,sqrt(n))
   y = multimap( [autocorr], sample )
-  neff = n*covariance(y,1)[1]/covariance(y,b)[1]
+  ym = mean(y,1)
+  neff = n*covariance(y,ym,1)[1]/covariance(y,ym,b)[1]
   isfinite(neff) || error( "unable to determine effective sample size" )
   State( sample, potential, n, b, round(Int,neff) )
 end
@@ -78,6 +79,7 @@ struct Mixture
   π::Vector{Float64}           # mixture composition
   f::Vector{Float64}           # free energy of each state
   P::Vector{Matrix{Float64}}   # probabilities of each configuration at all states
+  pm::Vector{Matrix{Float64}}  # mean probabilities at all states
   u0::Vector{Matrix{Float64}}  # reduced energy of each configuration at the mixture state
   B0⁺::Matrix{Float64}
   Θ::Matrix{Float64}
@@ -149,11 +151,12 @@ function Mixture( states::Vector{State}; title::String = "Untitled",
   (D, V) = eig(B0)
   D⁺ = diagm(map(x-> abs(x) < tol ? 0.0 : 1.0/x, D))
   B0⁺ = Symmetric(V*D⁺*V')
-  Σ0 = sum(π[i]^2*covariance(P[i],states[i].b) for i=1:m)
+  pm = [mean(P[i],1) for i=1:m]
+  Σ0 = sum(π[i]^2*covariance(P[i], pm[i], states[i].b) for i=1:m)
   Θ = Symmetric(B0⁺*Σ0*B0⁺)
   verbose && aux.info( "Free-energy covariance matrix:", full(Θ) )
 
-  Mixture( title, states, properties, m, n, π, f, P, u0, B0⁺, Θ )
+  Mixture( title, states, properties, m, n, π, f, P, pm, u0, B0⁺, Θ )
 end
 
 """
@@ -168,55 +171,60 @@ function freeEnergies( mixture::Mixture )
 end
 
 """
-    reweighting( mixture, functions, potentials )
+    reweighting( mixture, functions, potential, parameter )
 
+Performs reweighting of the properties computed by `functions` from the mixture to the
+states determined by the provided `potential` with all `parameter` values. 
 """
 function reweighting( mixture::Mixture,
                       properties::Union{Function,Vector{T}} where T<:Function,
                       potential::Function, parameter::AbstractArray )
+
+  state = mixture.state
   m = mixture.m
   π = mixture.π
   P = mixture.P
-  state = mixture.state
-  pm = [mean(P[i],1) for i=1:m]
-  b = [state[i].b for i=1:m]
+  pm = mixture.pm
 
   # Compute z so that z[i] contains a matrix of all properties evaluated for sample i:
-  z = [hcat(multimap( properties, state[i].sample ), ones(state[i].n)) for i=1:m]
+  z = [hcat(ones(state[i].n), multimap( properties, state[i].sample )) for i=1:m]
 
-  # Carry out reweighting for the provided potential with every parameter value:
-  for value in parameter
-    u = x->potential(x,value)
+  np = length(parameter)
+  y0 = Vector{Vector{Float64}}(np)
+  Ξ = Vector{Matrix{Float64}}(np)
+
+  # Carry out reweighting with every parameter value:
+  for k = 1:np
+    u = x->potential(x,parameter[k])
     Δu = [mixture.u0[i] - multimap( u, state[i].sample ) for i=1:m]
     maxΔu = maximum([maximum(Δu[i]) for i=1:m])
     y = [exp.(Δu[i] - maxΔu) .* z[i] for i=1:m]
     ym = [mean(y[i],1) for i=1:m]
-    y0 = sum(π.*ym)
-    Σy0y0 = sum(π[i]^2*covariance(y[i], b[i]; ym = ym[i]) for i=1:m)
-    Σy0p0 = sum(π[i]^2*covariance(y[i], P[i], b[i]; ym = ym[i], zm = pm[i]) for i=1:m)
-    @show y0
+    Σy0y0 = sum(π[i]^2*covariance(y[i], ym[i], state[i].b) for i=1:m)
+    Σp0y0 = sum(π[i]^2*covariance(P[i], pm[i], y[i], ym[i], state[i].b) for i=1:m)
+    Z0 = -sum(gemm('T', 'N', π[i]/state[i].n, P[i], y[i]) for i=1:m)
+    A = Z0'*mixture.B0⁺*Σp0y0
+    y0[k] = vec(sum(π.*ym))
+    Ξ[k] = Σy0y0 + A + A' + Z0'*mixture.Θ*Z0
   end
+
 end
 
-#reweighting( mixture::Mixture, property::Function,
-#             potential::Union{Function,Vector{T}} where T<:Function ) = reweighting( mixture, properties, [potential] )
-
 """
-    covariance( y,[ z,] b )
+    covariance( y, ym, [ z, zm,] b )
 
 Computes either the covariance matrix of the columns of matrix `y` among themselves or the
 cross-covariance matrix between the columns of matrix `y` with those of matrix `z`. The
 method of Overlap Batch Mean (OBM) is employed with blocks of size `b`.
 """
-function covariance( y::Matrix{T}, b::Integer;
-                     ym = mean(y,1) ) where T<:AbstractFloat
+function covariance( y::Matrix{T}, ym::Matrix{T}, b::Integer ) where T<:AbstractFloat
   S = aux.SumOfDeviationsPerBlock( y, ym, b )
   nmb = size(y,1) - b
   return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
 end
 
-function covariance( y::Matrix{T}, z::Matrix{T}, b::Integer;
-                     ym = mean(y,1), zm = mean(z,1) ) where T<:AbstractFloat
+function covariance( y::Matrix{T}, ym::Matrix{T},
+                     z::Matrix{T}, zm::Matrix{T}, b::Integer ) where T<:AbstractFloat
   Sy = aux.SumOfDeviationsPerBlock( y, ym, b )
   Sz = aux.SumOfDeviationsPerBlock( z, zm, b )
   nmb = size(y,1) - b

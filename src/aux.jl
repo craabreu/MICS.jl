@@ -34,7 +34,7 @@ function compute!( u0, P, π, f, u )
     numer = exp.(a .- max)
     denom = sum(numer,2)
     P[i] = numer ./ denom
-    u0[i] = max + log.(denom)
+    u0[i] = -(max + log.(denom))
   end
 end
 
