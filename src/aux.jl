@@ -15,9 +15,8 @@ function proximitySequence( x )
   return seq[2:end]
 end
 
-function SumOfDeviationsPerBlock( y::Matrix{T}, b::Integer ) where T<:AbstractFloat
+function SumOfDeviationsPerBlock( y::Matrix{T}, ym::Matrix{T}, b::Integer ) where T<:AbstractFloat
   (m,n) = size(y)
-  ym = mean(y,1)
   Δy = y .- ym
   B = Matrix{T}(m-b+1,n)
   B[1,:] = sum(Δy[1:b,:],1)

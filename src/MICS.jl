@@ -172,28 +172,31 @@ end
 
 """
 function reweighting( mixture::Mixture,
-                      properties::Union{Function,Vector{T1}} where T1<:Function,
-                      potentials::Vector{T2} where T2<:Function )
+                      properties::Union{Function,Vector{T}} where T<:Function,
+                      potential::Function, parameter::AbstractArray )
   m = mixture.m
   π = mixture.π
+  P = mixture.P
   state = mixture.state
+  pm = [mean(P[i],1) for i=1:m]
+  b = [state[i].b for i=1:m]
 
   # Compute z so that z[i] contains a matrix of all properties evaluated for sample i:
   z = [hcat(multimap( properties, state[i].sample ), ones(state[i].n)) for i=1:m]
 
-  # Carry out reweighting for every provided potential:
-  for k = 1:length(potentials)
-    Δu = [mixture.u0[i] - multimap( potentials[k], state[i].sample ) for i=1:m]
+  # Carry out reweighting for the provided potential with every parameter value:
+  for value in parameter
+    u = x->potential(x,value)
+    Δu = [mixture.u0[i] - multimap( u, state[i].sample ) for i=1:m]
     maxΔu = maximum([maximum(Δu[i]) for i=1:m])
     y = [exp.(Δu[i] - maxΔu) .* z[i] for i=1:m]
     ym = [mean(y[i],1) for i=1:m]
-    y0 = sum(π[i]*ym[i] for i=1:m)
+    y0 = sum(π.*ym)
+    Σy0y0 = sum(π[i]^2*covariance(y[i], b[i]; ym = ym[i]) for i=1:m)
+    Σy0p0 = sum(π[i]^2*covariance(y[i], P[i], b[i]; ym = ym[i], zm = pm[i]) for i=1:m)
     @show y0
   end
 end
-
-reweighting( mixture::Mixture, properties::Union{Function,Vector{T}} where T<:Function,
-             potential::Function ) = reweighting( mixture, properties, [potential] )
 
 #reweighting( mixture::Mixture, property::Function,
 #             potential::Union{Function,Vector{T}} where T<:Function ) = reweighting( mixture, properties, [potential] )
@@ -205,15 +208,17 @@ Computes either the covariance matrix of the columns of matrix `y` among themsel
 cross-covariance matrix between the columns of matrix `y` with those of matrix `z`. The
 method of Overlap Batch Mean (OBM) is employed with blocks of size `b`.
 """
-function covariance( y::Matrix{T}, b::Integer ) where T<:AbstractFloat
-  S = aux.SumOfDeviationsPerBlock( y, b )
+function covariance( y::Matrix{T}, b::Integer;
+                     ym = mean(y,1) ) where T<:AbstractFloat
+  S = aux.SumOfDeviationsPerBlock( y, ym, b )
   nmb = size(y,1) - b
   return Symmetric(syrk('U', 'T', 1.0/(b*nmb*(nmb+1)), S))
 end
 
-function covariance( y::Matrix{T}, z::Matrix{T}, b::Integer ) where T<:AbstractFloat
-  Sy = SumOfDeviationsPerBlock( y, b )
-  Sz = SumOfDeviationsPerBlock( z, b )
+function covariance( y::Matrix{T}, z::Matrix{T}, b::Integer;
+                     ym = mean(y,1), zm = mean(z,1) ) where T<:AbstractFloat
+  Sy = aux.SumOfDeviationsPerBlock( y, ym, b )
+  Sz = aux.SumOfDeviationsPerBlock( z, zm, b )
   nmb = size(y,1) - b
   return gemm('T', 'N', 1.0/(b*nmb*(nmb+1)), Sy, Sz)
 end
