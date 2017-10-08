@@ -9,6 +9,7 @@ without sub-sampling.
 module MICS
 
 using DataFrames
+using DataFramesMeta
 using Base.LinAlg.BLAS
 
 export State,
@@ -16,7 +17,8 @@ export State,
        freeEnergies,
        reweighting,
        covariance,
-       multimap
+       multimap,
+       @prop
 
 include("aux.jl")
 
@@ -178,7 +180,8 @@ states determined by the provided `potential` with all `parameter` values.
 """
 function reweighting( mixture::Mixture,
                       properties::Union{Function,Vector{T}} where T<:Function,
-                      potential::Function, parameter::AbstractArray )
+                      potential::Function,
+                      parameter::AbstractArray )
 
   state = mixture.state
   m = mixture.m
@@ -241,23 +244,6 @@ is the same as in `frame` and the number of columns is equal to the length of `f
 Each function of the array might for instance receive `x` and return the result of an
 element-wise calculation involving `x[:a]`, `x[:b]`, etc, with `a`, `b`, etc being names of
 properties in `frame`.
-
-# Example
-```jldoctest
-julia> df = DataFrame(a=rand(3),b=rand(3))
-3×2 DataFrames.DataFrame
-│ Row │ a         │ b        │
-├─────┼───────────┼──────────┤
-│ 1   │ 0.601568  │ 0.434138 │
-│ 2   │ 0.167932  │ 0.272908 │
-│ 3   │ 0.20209   │ 0.153349 │
-
-julia> multimap([x->x[:a]+x[:b],x->x[:a].*x[:b]],df)
-3×2 Array{Float64,2}:
- 1.03571   0.261164 
- 0.44084   0.04583  
- 0.355439  0.0309902
-```
 """
 function multimap( functions::Array{T} where T <: Function, frame::DataFrame )
   m = length(functions)
@@ -269,5 +255,12 @@ function multimap( functions::Array{T} where T <: Function, frame::DataFrame )
 end
 
 multimap( f::Function, frame::DataFrame ) = multimap( [f], frame )
+
+"""
+    @prop( expr )
+"""
+macro prop( expr )
+  esc(DataFramesMeta.with_anonymous(expr))
+end
 
 end
